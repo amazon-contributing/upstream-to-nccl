@@ -131,6 +131,8 @@ __forceinline__ __device__ void sendToken(
     int dstRank,
     int dstExpertLocalIdx,
     int currRank,
+    int numRanks,
+    unsigned dataSignalsBase,
     int* rankMask,
     const ncclWindow_t* windows,
     ncclDevComm* devComms,
@@ -148,6 +150,9 @@ __forceinline__ __device__ void sendToken(
                 ncclGin net(devComms[commId], ctxId);
                 ncclTeam world = ncclTeamWorld(devComms[commId]);
                 auto ncclWindow = windows[commId];
+                // Per-token weak signal: increments data signal for (dstExpertLocal, currRank) by 1.
+                // Receiver waits for data signal == (count + 1 - 1) = count to confirm all tokens landed.
+                auto dataSignalId = dataSignalsBase + dstExpertLocalIdx * numRanks + currRank;
                 net.put(world,
                         dstRank,
                         ncclWindow,
@@ -155,7 +160,7 @@ __forceinline__ __device__ void sendToken(
                         ncclWindow,
                         expectedSrcOffset,
                         numBytesPerMsg,
-                        ncclGin_None{},  // no signal
+                        ncclGin_SignalInc{dataSignalId},
                         ncclGin_None{},  // no counter
                         ncclCoopThread());
             }
@@ -263,6 +268,7 @@ __forceinline__ __device__ int waitForRecvTokens(
     int* recvCntBuf,
     int* rankMask,
     unsigned signalsBase,
+    unsigned dataSignalsBase,
     const ncclWindow_t* windows,
     ncclDevComm* devComms,
     int* recvStats,
@@ -280,12 +286,31 @@ __forceinline__ __device__ int waitForRecvTokens(
             auto ctxId = localExpertIdx % MAX_NCCL_GIN_CTX_PER_COMM;
             ncclGin net(devComms[commId], ctxId);
             uint64_t curValue;
+            // Step 1: wait for count signal (existing protocol)
             do {
                 curValue = net.readSignal(signalsBase + localExpertIdx * numRanks + srcRank);
             } while (curValue < 1                                                       // data not arrived
                      && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES  // not timeout
             );
             net.resetSignal(signalsBase + localExpertIdx * numRanks + srcRank);
+
+            // Step 2: if count signal arrived and expectedCount > 0, wait for per-token
+            //         data signals to accumulate to the expected count (curValue - 1).
+            //         This provides stronger per-token delivery confirmation alongside
+            //         the existing count-carrying signal.
+            if (curValue >= 1 && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES) {
+                uint64_t expectedTokenCount = curValue - 1;
+                if (expectedTokenCount > 0) {
+                    uint64_t dataValue;
+                    do {
+                        dataValue = net.readSignal(dataSignalsBase + localExpertIdx * numRanks + srcRank);
+                    } while (dataValue < expectedTokenCount                                       // tokens still in flight
+                             && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES  // not timeout
+                    );
+                    net.resetSignal(dataSignalsBase + localExpertIdx * numRanks + srcRank);
+                }
+            }
+
             numRecvTokens = -(int)curValue;
         } else {
             while ((numRecvTokens = ld_acquire_sys_global((recvCntBuf + localExpertIdx * numRanks + srcRank))) ==
@@ -412,7 +437,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(// INPUT
                                                     int numComms,
                                                     ncclDevComm* devComms,
                                                     const ncclWindow_t* windows,
-                                                    unsigned signalsBase) {
+                                                    unsigned signalsBase,
+                                                    unsigned dataSignalsBase) {
     const auto smId = static_cast<int>(blockIdx.x);
     const auto threadId = static_cast<int>(threadIdx.x);
     const auto warpId = threadId / 32, laneId = get_lane_id();
@@ -492,7 +518,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(// INPUT
                 sendToken(
                     sendBufSrcIdx, recvPtr, expectedDstOffset, tokenIdx,
                     sendOff, numBytesPerMsg, dstRank, dstExpertLocalIdx,
-                    currRank, rankMask, windows, devComms, laneId, numInt4PerMsg);
+                    currRank, numRanks, dataSignalsBase,
+                    rankMask, windows, devComms, laneId, numInt4PerMsg);
 
                 // Increase counter after finishing
                 __syncwarp();
@@ -579,7 +606,7 @@ LOW_LATENCY_DISPATCH_RECV:
         if (subWarpId == 1 and laneId == 0) {
             numRecvTokens = waitForRecvTokens(
                 srcRank, localExpertIdx, currRank, numRanks, recvCntOff,
-                recvCntBuf, rankMask, signalsBase, windows, devComms,
+                recvCntBuf, rankMask, signalsBase, dataSignalsBase, windows, devComms,
                 recvStats, waitStats);
             recvTokenBeginIdx = atomicAdd(outCnt + localExpertIdx, numRecvTokens);
             sharedNumRecvTokens[warpGroupId] = numRecvTokens;
@@ -633,6 +660,7 @@ void dispatch(const void* inData,
               ncclDevComm* devComms,
               const ncclWindow_t* windows,
               unsigned signalsBase,
+              unsigned dataSignalsBase,
               void* workspace,
               int numDeviceSms,
               cudaStream_t stream) {
@@ -695,7 +723,8 @@ LAUNCH_KERNEL(&cfg, dispatchFunc, \
               numComms, \
               devComms, \
               windows, \
-              signalsBase); } break
+              signalsBase, \
+              dataSignalsBase); } break
 
     SETUP_LAUNCH_CONFIG(numSms, numWarps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

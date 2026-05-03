@@ -116,6 +116,7 @@ void dispatch(const void* inData,
               ncclDevComm* devComms,
               const ncclWindow_t* windows,
               unsigned signalsBase,
+              unsigned dataSignalsBase,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream);

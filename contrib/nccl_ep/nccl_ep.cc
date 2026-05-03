@@ -1075,8 +1075,11 @@ ncclResult_t ncclEpCreateGroup(
         ncclDevCommRequirements reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
         if (props.nLsaTeams > 1) {
             reqs.ginContextCount = ep_group->config.num_qp_per_rank;  // all contexts in single comm
-            // Signal layout: combine uses [0, num_total_signals), dispatch uses [num_total_signals, 2*num_total_signals)
-            reqs.ginSignalCount = 2 * num_total_signals;
+            // Signal layout:
+            //   combine:            [0, num_total_signals)
+            //   dispatch count:     [num_total_signals, 2*num_total_signals)
+            //   dispatch per-token: [2*num_total_signals, 3*num_total_signals)
+            reqs.ginSignalCount = 3 * num_total_signals;
             reqs.ginForceEnable = true;
             reqs.ginConnectionType = NCCL_GIN_CONNECTION_FULL;
         }
@@ -1844,6 +1847,7 @@ ncclResult_t ncclEpDispatch(
         const auto next_clean_meta = next_buffer.clean_meta();
 
         unsigned signal_base = group->num_dispatch_signals;
+        unsigned data_signal_base = 2 * group->num_dispatch_signals;
         auto dispatch_fn = [=](int phases) {
             // Prepare data pointers
             auto* recv_x_data = recv_x->data;
@@ -1891,6 +1895,7 @@ ncclResult_t ncclEpDispatch(
                 group->nccl_dev_comms,
                 group->nccl_wins,
                 signal_base,
+                data_signal_base,
                 group->ep_workspace,
                 group->device_sm_count,
                 stream
