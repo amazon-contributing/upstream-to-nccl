@@ -410,6 +410,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(// INPUT
                                                     int* outSrcInfo,
                                                     int64_t* outLayout,
                                                     int* outCnt,
+                                                    int* outTokensPerExpert,
                                                     // INTERMEDIATE
                                                     void* sendBuf,
                                                     void* recvBuf,
@@ -553,6 +554,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(// INPUT
         const auto dstExpertLocalIdx = responsibleExpertIdx % numLocalExperts;
         const auto numTokensSent = sharedNumTokensSentPerExpert[responsibleExpertIdx - smId * numWarpGroups];
 
+        // Persist per-expert token count for combine RX to use
+        if (outTokensPerExpert != nullptr)
+            outTokensPerExpert[responsibleExpertIdx] = numTokensSent;
+
         // Wait local sends issued and send expert counts
         while (ld_acquire_global(expertDone + responsibleExpertIdx) != FINISHED_SUM_TAG * 2);
         auto recvCntPtr = reinterpret_cast<uint64_t>(recvCntBuf + dstExpertLocalIdx * numRanks + currRank);
@@ -635,6 +640,7 @@ void dispatch(const void* inData,
               int* outSrcInfo,
               int64_t* outLayout,
               int* outCnt,
+              int* outTokensPerExpert,
               void* sendBuf,
               void* recvBuf,
               int* recvCntBuf,
@@ -698,6 +704,7 @@ LAUNCH_KERNEL(&cfg, dispatchFunc, \
               outSrcInfo, \
               outLayout, \
               outCnt, \
+              outTokensPerExpert, \
               sendBuf, \
               recvBuf, \
               recvCntBuf, \
@@ -906,44 +913,23 @@ __forceinline__ __device__ void cleanNextRecvCntBufAndNotify(
         atomic_add_release_global(atomicCleanFlag, numExperts);
 }
 
-// Send finish flag to destination rank
+// Send finish flag to destination rank (intra-node only).
+// Inter-node path no longer needs a finish flag — the receiver waits on
+// per-token data signals using the locally-known expected count.
 __forceinline__ __device__ void sendFinishFlag(
-    int globalExpertIdx,
     int dstRank,
     int localExpertIdx,
     int currRank,
-    int numLocalExperts,
     uint64_t recvFlagPtr,
     size_t recvFlagOffset,
-    int* recvFlagBuf,
     int* rankMask,
-    unsigned signalsBase,
     const ncclWindow_t* windows,
     ncclDevComm* devComms) {
     auto dstP2pPtr = ncclGetP2pPtr(
         recvFlagPtr, recvFlagOffset, currRank, dstRank, localExpertIdx, windows, devComms);
 
     if (not isRankMasked(rankMask, dstRank)) {
-        if (dstP2pPtr == 0) {
-            auto signalId = signalsBase + globalExpertIdx;
-            constexpr int commId = 0;
-            auto ctxId = localExpertIdx % MAX_NCCL_GIN_CTX_PER_COMM;
-
-            ncclGin net(devComms[commId], ctxId);
-            ncclTeam world = ncclTeamWorld(devComms[commId]);
-            auto ncclWindow = windows[commId];
-
-            net.put(world,
-                    dstRank,
-                    ncclWindow,
-                    recvFlagOffset,
-                    ncclWindow,
-                    0,
-                    0,  // 0 bytes transfer
-                    ncclGin_SignalAdd{signalId, 1},
-                    ncclGin_None{},  // no counter
-                    ncclCoopThread());
-        } else {
+        if (dstP2pPtr != 0) {
             st_release_sys_global(reinterpret_cast<int*>(dstP2pPtr), 1);
         }
     }
@@ -958,7 +944,8 @@ __forceinline__ __device__ void waitForRecvFlag(
     size_t recvFlagOff,
     int* recvFlagBuf,
     int* rankMask,
-    unsigned signalsBase,
+    unsigned dataSignalsBase,
+    const int* tokensPerExpert,
     const ncclWindow_t* windows,
     ncclDevComm* devComms,
     int64_t* waitStats) {
@@ -970,17 +957,24 @@ __forceinline__ __device__ void waitForRecvFlag(
         0x01, srcOffset, currRank, srcRank, (responsibleExpertIdx % numLocalExperts), windows, devComms);
     if (not isRankMasked(rankMask, srcRank)) {
         if (srcP2pPtr == 0) {
-            uint64_t curValue;
             auto localExpertIdxWait = responsibleExpertIdx % numLocalExperts;
             constexpr int commIdWait = 0;
             auto ctxIdWait = localExpertIdxWait % MAX_NCCL_GIN_CTX_PER_COMM;
             ncclGin net(devComms[commIdWait], ctxIdWait);
-            do {
-                curValue = net.readSignal(signalsBase + responsibleExpertIdx);
-            } while (curValue < 1                                                       // signal not arrived
-                     && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES  // not timeout
-            );
-            net.resetSignal(signalsBase + responsibleExpertIdx);
+
+            // Wait for per-token data signals to reach the expected count.
+            // The expected count is known locally from tokensPerExpert[] (written
+            // by dispatch), so we no longer need the count-carrying finish flag.
+            int expectedTokenCount = tokensPerExpert[responsibleExpertIdx];
+            if (expectedTokenCount > 0) {
+                uint64_t dataValue;
+                do {
+                    dataValue = net.readSignal(dataSignalsBase + responsibleExpertIdx);
+                } while (dataValue < static_cast<uint64_t>(expectedTokenCount)            // tokens still in flight
+                         && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES  // not timeout
+                );
+                net.resetSignal(dataSignalsBase + responsibleExpertIdx);
+            }
         } else {
             while (ld_acquire_sys_global(recvFlagBuf + responsibleExpertIdx) == 0  // recv not ready
                    && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES   // not timeout
@@ -1017,6 +1011,7 @@ __forceinline__ __device__ void sendTokenViaRdma(
     size_t recvOff,
     size_t numBytesPerSlot,
     int hidden,
+    unsigned dataSignalsBase,
     ncclDevComm* devComms,
     const ncclWindow_t* windows) {
     const auto expectedDstOffset = recvOff + (globalExpertIdx * maxTokensPerRank + srcIdx) * numBytesPerSlot;
@@ -1029,6 +1024,10 @@ __forceinline__ __device__ void sendTokenViaRdma(
     ncclGin net(devComms[commId], ctxId);
     ncclTeam world = ncclTeamWorld(devComms[commId]);
     auto ncclWindow = windows[commId];
+    // Per-token weak signal: increments the combine data signal slot for this
+    // globalExpert on the destination rank. Receiver uses this alongside the
+    // existing sendFinishFlag count-signal to verify each token landed.
+    auto dataSignalId = dataSignalsBase + globalExpertIdx;
     net.put(world,
             dstRank,
             ncclWindow,
@@ -1036,7 +1035,7 @@ __forceinline__ __device__ void sendTokenViaRdma(
             ncclWindow,
             expectedBufOffset,
             hidden * sizeof(nv_bfloat16),
-            ncclGin_None{},  // no signal
+            ncclGin_SignalInc{dataSignalId},  // per-token weak signal
             ncclGin_None{},  // no counter
             ncclCoopThread());
 }
@@ -1073,6 +1072,7 @@ __forceinline__ __device__ void processAndSendToken(
     TmaLoadAndArriveT& tmaLoadAndArrive,
     GetNumTmaBytesT& getNumTmaBytes,
     int laneId,
+    unsigned dataSignalsBase,
     ncclDevComm* devComms,
     const ncclWindow_t* windows) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
@@ -1143,7 +1143,7 @@ __forceinline__ __device__ void processAndSendToken(
             sendTokenViaRdma(
                 globalExpertIdx, dstRank, localExpertIdx, currRank, numRanks,
                 maxTokensPerRank, tokenIdx, srcIdx, sendOff, recvOff,
-                numBytesPerSlot, hidden, devComms, windows);
+                numBytesPerSlot, hidden, dataSignalsBase, devComms, windows);
         }
     }
 }
@@ -1184,7 +1184,8 @@ __global__ __launch_bounds__(1024, 1) void combine(// INPUT
                                                    int numComms,
                                                    ncclDevComm* devComms,
                                                    const ncclWindow_t* windows,
-                                                   unsigned signalsBase) {
+                                                   unsigned dataSignalsBase,
+                                                   const int* tokensPerExpert) {
     const auto smId = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto numSms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto threadId = static_cast<int>(threadIdx.x);
@@ -1296,7 +1297,7 @@ __global__ __launch_bounds__(1024, 1) void combine(// INPUT
                     hidden, hiddenBf16Int4, hiddenBf16Int4Pad, kNumMetaBytes,
                     kNumTMABufferBytes, zeroCopy,
                     dstP2pPtr, tmaBuffers, fullBarriers, metaBuffers, tmaPhase,
-                    tmaLoadAndArrive, getNumTmaBytes, laneId, devComms, windows);
+                    tmaLoadAndArrive, getNumTmaBytes, laneId, dataSignalsBase, devComms, windows);
             }
         }
 
@@ -1309,8 +1310,8 @@ __global__ __launch_bounds__(1024, 1) void combine(// INPUT
             size_t recvFlagOffset = recvFlagOff + globalExpertIdx * sizeof(int);
 
             sendFinishFlag(
-                globalExpertIdx, dstRank, localExpertIdx, currRank, numLocalExperts,
-                recvFlagPtr, recvFlagOffset, recvFlagBuf, rankMask, signalsBase,
+                dstRank, localExpertIdx, currRank,
+                recvFlagPtr, recvFlagOffset, rankMask,
                 windows, devComms);
             atomic_add_release_global(atomicCleanFlag, -1);
         }
@@ -1336,8 +1337,8 @@ LOW_LATENCY_COMBINE_RECV:
             const auto srcRank = responsibleExpertIdx / numLocalExperts;
             waitForRecvFlag(
                 responsibleExpertIdx, srcRank, currRank, numLocalExperts,
-                recvFlagOff, recvFlagBuf, rankMask, signalsBase,
-                windows, devComms, waitStats);
+                recvFlagOff, recvFlagBuf, rankMask, dataSignalsBase,
+                tokensPerExpert, windows, devComms, waitStats);
         }
     }
     cg::this_grid().sync();
@@ -1523,7 +1524,8 @@ void combine(const void* inData,
              int numComms,
              ncclDevComm* devComms,
              const ncclWindow_t* windows,
-             unsigned signalsBase,
+             unsigned dataSignalsBase,
+             const int* tokensPerExpert,
              void* workspace,
              int numDeviceSms,
              cudaStream_t stream) {
@@ -1594,7 +1596,8 @@ if (useLogfmt) { \
                   numComms, \
                   devComms, \
                   windows, \
-                  signalsBase); \
+                  dataSignalsBase, \
+                  tokensPerExpert); \
 } else { \
     SET_SHARED_MEMORY_FOR_TMA((combine<false, hidden, kCombineMaxTopk, kCombineMaxUnrolls>)); \
     LAUNCH_KERNEL(&cfg, combine<false, hidden, kCombineMaxTopk, kCombineMaxUnrolls>, \
@@ -1629,7 +1632,8 @@ if (useLogfmt) { \
                   numComms, \
                   devComms, \
                   windows, \
-                  signalsBase); \
+                  dataSignalsBase, \
+                  tokensPerExpert); \
 } } break
 
     SETUP_LAUNCH_CONFIG(numSms, numWarps * 32, stream);

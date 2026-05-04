@@ -1075,10 +1075,10 @@ ncclResult_t ncclEpCreateGroup(
         ncclDevCommRequirements reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
         if (props.nLsaTeams > 1) {
             reqs.ginContextCount = ep_group->config.num_qp_per_rank;  // all contexts in single comm
-            // Signal layout:
-            //   combine:            [0, num_total_signals)
-            //   dispatch count:     [num_total_signals, 2*num_total_signals)
-            //   dispatch per-token: [2*num_total_signals, 3*num_total_signals)
+            // Signal layout (N = num_total_signals):
+            //   combine per-token:  [0,    N)   - per-token data signals for combine RX
+            //   dispatch count:     [N,    2N)  - count-carrying finish signals for dispatch RX
+            //   dispatch per-token: [2N,   3N)  - per-token data signals for dispatch RX
             reqs.ginSignalCount = 3 * num_total_signals;
             reqs.ginForceEnable = true;
             reqs.ginConnectionType = NCCL_GIN_CONNECTION_FULL;
@@ -1283,6 +1283,13 @@ struct ncclEpHandle {
             ncclNDTensor_t expert_dispatch_layout;
 
             int buffer_idx = 0;
+
+            // Per-expert token count: how many tokens this rank dispatched to each
+            // global expert. Written by dispatch kernel, consumed by combine RX to
+            // know expected per-token data signal count without relying on the
+            // count-carrying finish flag. Double-buffered (like RDMA buffers) because
+            // dispatch N and combine N-1 can overlap in send_only mode.
+            int* tokens_per_expert_data[2] = {nullptr, nullptr};
 
             std::function<void(unsigned int)> continue_fn;
             nccl_ep::LowLatencyLayout layout;
@@ -1525,6 +1532,16 @@ ncclResult_t ncclEpCreateHandle(
         ncclEpTensorCreate(ep_group, &handle->ll.expert_recv_source_indices, 2, ncclInt32, NCCL_EP_TENSOR_TAG_NONE, nullptr, static_cast<unsigned int>(handle->group->num_local_experts), static_cast<unsigned int>(ep_group->nRanks * ep_group->config.max_tokens_per_rank));
         ncclEpTensorCreate(ep_group, &handle->ll.expert_dispatch_layout, 2, ncclInt64, NCCL_EP_TENSOR_TAG_NONE, nullptr, static_cast<unsigned int>(handle->group->num_local_experts), static_cast<unsigned int>(ep_group->nRanks));
 
+        // Per-expert token count buffer: dispatch writes how many tokens this rank
+        // sent to each global expert. Combine RX reads it to know expected data signal count.
+        // Double-buffered to avoid race between dispatch N write and combine N-1 read.
+        for (int i = 0; i < 2; ++i) {
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&handle->ll.tokens_per_expert_data[i]),
+                                  ep_group->config.num_experts * sizeof(int)));
+            CUDA_CHECK(cudaMemset(handle->ll.tokens_per_expert_data[i], 0,
+                                  ep_group->config.num_experts * sizeof(int)));
+        }
+
         assert((ep_group->config.max_tokens_per_rank * handle->group->num_local_experts) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
 
         handle->ll.layout = nccl_ep::LowLatencyLayout(handle->group->rdma_buffer, handle->group->config.max_tokens_per_rank, handle->group->hidden, handle->group->nRanks, handle->group->config.num_experts);
@@ -1763,6 +1780,12 @@ ncclResult_t ncclEpHandleDestroy(
     if (handle->group->config.algorithm == NCCL_EP_ALGO_LOW_LATENCY) {
         tensor_free(handle->group, handle->ll.expert_recv_source_indices);
         tensor_free(handle->group, handle->ll.expert_dispatch_layout);
+        if (handle->ll.tokens_per_expert_data[0]) {
+            CUDA_CHECK(cudaFree(handle->ll.tokens_per_expert_data[0]));
+            CUDA_CHECK(cudaFree(handle->ll.tokens_per_expert_data[1]));
+            handle->ll.tokens_per_expert_data[0] = nullptr;
+            handle->ll.tokens_per_expert_data[1] = nullptr;
+        }
     } else if (handle->group->config.algorithm == NCCL_EP_ALGO_HIGH_THROUGHPUT) {
         if (handle->hybridep.num_tokens_for_experts_host) {
             CUDA_CHECK(cudaFreeHost(handle->hybridep.num_tokens_for_experts_host));
@@ -1846,8 +1869,11 @@ ncclResult_t ncclEpDispatch(
         auto& next_buffer = handle->ll.layout.buffers[handle->ll.buffer_idx ^= 1];
         const auto next_clean_meta = next_buffer.clean_meta();
 
-        unsigned signal_base = group->num_dispatch_signals;
-        unsigned data_signal_base = 2 * group->num_dispatch_signals;
+        // tokens_per_expert uses the same buffer slot as dispatch's RDMA buffers (pre-flip index)
+        int* tokens_per_expert_buf = handle->ll.tokens_per_expert_data[handle->ll.buffer_idx ^ 1];
+
+        unsigned signal_base = group->num_dispatch_signals;           // dispatch count:    [N, 2N)
+        unsigned data_signal_base = 2 * group->num_dispatch_signals;  // dispatch per-token:[2N, 3N)
         auto dispatch_fn = [=](int phases) {
             // Prepare data pointers
             auto* recv_x_data = recv_x->data;
@@ -1870,6 +1896,7 @@ ncclResult_t ncclEpDispatch(
                 expert_recv_source_indices_data,
                 expert_dispatch_layout_data,
                 recv_count_data,
+                tokens_per_expert_buf,
                 buffer.dispatch_rdma_send_buffer,
                 buffer.dispatch_rdma_recv_data_buffer,
                 buffer.dispatch_rdma_recv_count_buffer,
@@ -2236,7 +2263,9 @@ ncclResult_t ncclEpCombine(
         assert(out->datatype == x->datatype);
 
         // Define combine lambda
-        unsigned signal_base = handle->ll.buffer_idx * (handle->group->num_dispatch_signals / 2);
+        unsigned data_signal_base = handle->ll.buffer_idx * (handle->group->num_dispatch_signals / 2);  // combine per-token: [0, N)
+        // Read from the same buffer slot that dispatch wrote to (pre-flip index)
+        const int* tokens_per_expert_buf = handle->ll.tokens_per_expert_data[handle->ll.buffer_idx ^ 1];
         auto combine_fn = [=](int phases) {
             // Prepare data pointers
             auto* out_data = out->data;
@@ -2278,7 +2307,8 @@ ncclResult_t ncclEpCombine(
                 handle->group->num_nccl_comms,
                 handle->group->nccl_dev_comms,
                 handle->group->nccl_wins,
-                signal_base,
+                data_signal_base,
+                tokens_per_expert_buf,
                 handle->group->ep_workspace,
                 handle->group->device_sm_count,
                 stream
