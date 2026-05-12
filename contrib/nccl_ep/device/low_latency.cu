@@ -179,11 +179,9 @@ __forceinline__ __device__ void cleanNextRecvCntBuf(
     int* nextRecvCntBuf,
     int nextRecvCntBufSize,
     int laneId) {
-    if (!dP2pDisabled) {
-        #pragma unroll
-        for (int i = laneId; i < nextRecvCntBufSize; i += 32)
-            nextRecvCntBuf[i] = 0;
-    }
+    #pragma unroll
+    for (int i = laneId; i < nextRecvCntBufSize; i += 32)
+        nextRecvCntBuf[i] = 0;
 }
 
 // Count tokens per expert from topk indices
@@ -238,20 +236,16 @@ __forceinline__ __device__ void sendExpertCount(
         if (dstP2pPtr == 0) {
             constexpr int commId = 0;
             auto ctxId = dstExpertLocalIdx % MAX_NCCL_GIN_CTX_PER_COMM;
-            auto signalId = signalsBase + dstExpertLocalIdx * numRanks + currRank;
             ncclGin net(devComms[commId], ctxId);
             ncclTeam world = ncclTeamWorld(devComms[commId]);
             auto ncclWindow = windows[commId];
-            net.put(world,
-                    dstRank,
-                    ncclWindow,
-                    recvCntOffset,
-                    ncclWindow,
-                    0,
-                    0,  // 0 bytes transfer
-                    ncclGin_SignalAdd{signalId, static_cast<uint64_t>(numTokensSent) + 1},
-                    ncclGin_None{},  // no counter
-                    ncclCoopThread());
+            net.putValue<int>(world,
+                              dstRank,
+                              ncclWindow,
+                              recvCntOffset,
+                              numTokensSent + 1,
+                              ncclGin_None{},
+                              ncclCoopThread());
         } else {
             st_release_sys_global(reinterpret_cast<int*>(dstP2pPtr), -numTokensSent - 1);
         }
@@ -285,14 +279,15 @@ __forceinline__ __device__ int waitForRecvTokens(
             constexpr int commId = 0;
             auto ctxId = localExpertIdx % MAX_NCCL_GIN_CTX_PER_COMM;
             ncclGin net(devComms[commId], ctxId);
-            uint64_t curValue;
-            // Step 1: wait for count signal (existing protocol)
+            volatile int* countSlot =
+                reinterpret_cast<volatile int*>(recvCntBuf + localExpertIdx * numRanks + srcRank);
+            int curValueI;
             do {
-                curValue = net.readSignal(signalsBase + localExpertIdx * numRanks + srcRank);
-            } while (curValue < 1                                                       // data not arrived
+                curValueI = *countSlot;
+            } while (curValueI == 0                                                   // data not arrived
                      && (waitRecvCost = clock64() - startTime) <= NUM_TIMEOUT_CYCLES  // not timeout
             );
-            net.resetSignal(signalsBase + localExpertIdx * numRanks + srcRank);
+            uint64_t curValue = static_cast<uint64_t>(curValueI);
 
             // Step 2: if count signal arrived and expectedCount > 0, wait for per-token
             //         data signals to accumulate to the expected count (curValue - 1).
@@ -902,11 +897,11 @@ __forceinline__ __device__ void cleanNextRecvCntBufAndNotify(
     int* atomicCleanFlag,
     int numExperts,
     int laneId) {
-    if (!dP2pDisabled) {
-        #pragma unroll
-        for (int i = laneId; i < nextRecvCntBufSize; i += 32)
-            nextRecvCntBuf[i] = 0;
-    }
+    // Dispatch now writes the count slots via RDMA put on both the P2P and
+    // GIN paths, so clean the region unconditionally.
+    #pragma unroll
+    for (int i = laneId; i < nextRecvCntBufSize; i += 32)
+        nextRecvCntBuf[i] = 0;
     // Notify before executing `int_p`
     __syncwarp();
     if (laneId == 0)
