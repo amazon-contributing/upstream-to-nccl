@@ -71,6 +71,7 @@ struct ginProxyCtx {
   int nContexts;
   int nCountersPerContext;
   int nSignalsPerContext;
+  int dispatchBatch; // GFDs to drain per (context, rank) per tick; from plugin props
   void* ginCtx; // from plugin
 };
 
@@ -463,6 +464,14 @@ static ncclResult_t ncclGinProxyCreateContext(void* collComm, ncclGinConfig_t* c
     queueSize = maxRequests;
   }
 
+  // How many GFDs the progress loop drains per (context, rank) per tick. The
+  // plugin advertises this through getProperties(); a value <= 0 means the
+  // plugin did not set it, so fall back to the single-pull behavior.
+  proxyCtx->dispatchBatch = cComm->props.ginProxyDispatchBatch;
+  if (proxyCtx->dispatchBatch < 1) {
+    proxyCtx->dispatchBatch = 1;
+  }
+
   if (config->nCounters) {
     // Allocate the counters on the GPU or CPU depending on GDR
     NCCLCHECK(allocMemCPUAccessible(&proxyCtx->counters, &proxyCtx->countersDev,
@@ -592,10 +601,14 @@ static ncclResult_t ncclGinProxyProgress(void *ginCtx) {
     struct ginProxyHostGpuCtx *hostGpuCtx = ctx->hostGpuCtx + contextId;
     NCCLCHECK(proxyGinPollCompletions(ctx->collComm, ctx, hostGpuCtx));
     for (int targetRank = 0; targetRank < ctx->nRanks; targetRank++) {
-      // Poll on the GFD queue
-      ncclGinProxyGfd_t gfd;
-      struct ginProxyGfdState *state = NULL;
-      if (proxyGinPollGfd(ctx, hostGpuCtx, targetRank, &gfd, &state)) {
+      // Drain up to dispatchBatch GFDs from this rank's queue before moving on.
+      // Draining more than one per tick amortizes the loop's per-tick fixed
+      // cost (completion poll, ginProgress, yield) when the queue is deep; the
+      // bound comes from the plugin via getProperties (default 1 = single pull).
+      for (int p = 0; p < ctx->dispatchBatch; p++) {
+        ncclGinProxyGfd_t gfd;
+        struct ginProxyGfdState *state = NULL;
+        if (!proxyGinPollGfd(ctx, hostGpuCtx, targetRank, &gfd, &state)) break;
         ncclResult_t ret =
           proxyGinProcessGfd(ctx, hostGpuCtx, targetRank, &gfd, state);
         if (ret) ctx->hasError = ret;
