@@ -81,13 +81,9 @@ struct nccl_ofi_gin_gdaki_dev_endpoint_handle {
    * <= sq_size before reserving slots. */
   uint32_t sq_size;
 
-  /* PutValue source-slot pool fields, mirrored from the aws-ofi-nccl
-   * plugin's endpoint handle to keep this struct's layout (ABI) identical
-   * to the plugin's. PutValue is not yet implemented on the NCCL device
-   * side, so the kernel does not read these today; they are reserved so
-   * the PutValue device path can use them without an ABI change. See the
-   * plugin definition (nccl_ofi_gin_gdaki_dev.h) — keep them in sync. */
   uint32_t putvalue_pad;
+
+  /* Base address of the PutValue source-slot pool for this endpoint. */
   uint64_t putvalue_slice_base;
 };
 
@@ -126,6 +122,9 @@ struct nccl_ofi_gin_gdaki_dev_handle {
    * endpoint and populates data.local_cntr_value at createContext
    * time so the kernel can poll for local completion. */
   struct nccl_ofi_gin_gdaki_dev_endpoint_handle data;
+
+  /* Dedicated PutValue poster endpoint. */
+  struct nccl_ofi_gin_gdaki_dev_endpoint_handle pvdata;
 
   /* Per-counter / per-signal endpoint handles, populated when the
    * caller asked createContext for nCounters / nSignals > 0. Both
@@ -173,11 +172,8 @@ struct nccl_ofi_gin_gdaki_dev_handle {
   uint64_t *scratch_remote_addrs;
   uint32_t *scratch_remote_rkeys;
 
-  /* PutValue source-slot pool metadata (lkey + per-slot stride),
-   * mirrored from the plugin's dev handle to keep the layout (ABI)
-   * identical. Reserved for the PutValue device path, which is not yet
-   * implemented on the NCCL side; the kernel does not read these today.
-   * Keep in sync with nccl_ofi_gin_gdaki_dev.h. */
+  /* lkey and slot stride for the pvdata PutValue source-slot pool (single
+   * MR over the whole pool, uniform slot size). */
   uint32_t putvalue_lkey;
   uint32_t putvalue_slot_size;
 };

@@ -8,9 +8,10 @@
  * specializations that target EFA via efa-dp-direct.
  *
  * Implemented: Put (data + signal/counter endpoints, signal-only via
- *              scratch buffer), Flush, GetSignalPtr, GetCounterPtr,
- *              ResetSignal, ResetCounter.
- * Stub: PutValue, Get, FlushAsync, Wait.
+ *              scratch buffer), PutValue (value staged through the
+ *              per-endpoint slot pool), Flush, GetSignalPtr,
+ *              GetCounterPtr, ResetSignal, ResetCounter.
+ * Stub: Get, FlushAsync, Wait.
  *************************************************************************/
 
 #ifndef _NCCL_DEVICE_GIN_EFA_GDA_H_
@@ -121,23 +122,30 @@ NCCL_DEVICE_INLINE static void ringDoorbell(
  * (ah, qpn, qkey) tuple. The local poster QP and the remote target QP
  * are chosen independently by the caller: counterId selects the local
  * poster (this `ep`), the target slot selects the remote tuple (via the
- * poster's [total_slots*nranks] target table). */
+ * poster's [total_slots*nranks] target table).
+ *
+ * PutValue staging (pvSrcVal != nullptr): the caller posts from the
+ * dedicated PutValue endpoint (pvdata), so each lane stages its value into
+ * its own pool slot at pvSliceBase + (reserved SQ slot % sq_size) *
+ * pvSlotSize and points the WR's SGE there. Put (pvSrcVal == nullptr) uses
+ * the caller's fixed srcAddr/srcLkey. */
 template <ncclGinResourceSharingMode mode>
 NCCL_DEVICE_INLINE static void postRdmaWrite(
     nccl_ofi_gin_gdaki_dev_endpoint_handle *ep, uint16_t ah, uint16_t qpn,
     uint32_t qkey, uint64_t srcAddr, uint32_t srcLkey, uint32_t writeBytes,
-    uint64_t dstAddr, uint32_t dstRkey, uint32_t optFlags = ncclGinOptFlagsDefault) {
+    uint64_t dstAddr, uint32_t dstRkey, uint32_t optFlags = ncclGinOptFlagsDefault,
+    const void *pvSrcVal = nullptr, uint32_t pvValBytes = 0,
+    uint32_t pvLkey = 0, uint64_t pvSliceBase = 0, uint32_t pvSlotSize = 0) {
 
   efa_cuda_qp       *qp                  = (efa_cuda_qp *)ep->qp;
   uint64_t          *submitted_count_ptr  = &ep->submitted_count;
   uint64_t          *local_cntr_ptr       = ep->local_cntr_value;
   uint32_t           sq_size_val          = ep->sq_size;
 
+  /* Only the SGE differs for PutValue, so set_sge is deferred. */
   efa_io_tx_wqe wr;
   efa_cuda_init_rdma_write_wr(&wr, (uint16_t)threadIdx.x, dstRkey, dstAddr);
-  efa_cuda_wr_set_sge(&wr, srcLkey, srcAddr, writeBytes);
   efa_cuda_wr_set_remote(&wr, ah, (uint32_t)qpn, qkey);
-
   /* Tag the WQE as PPS-sensitive. GIN puts are small, high-rate writes, so
    * ask the NIC to optimize for packets-per-second (burst PPS) rather than
    * bandwidth. This sets the PROCESSING_HINTS field in the WQE meta
@@ -147,10 +155,8 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
   /* Sliding-window SQ post with warp coalescing (Stage 2).
    *
    * Inlines the reserve / write / doorbell sequence directly against
-   * the efa_cuda_qp ring (uses only the WQE *builders* above, not the
-   * efa-dp-direct start_sq_batch / sq_batch_place_wr / flush_sq_wrs
-   * helpers). Two shared cursors in the QP coordinate all posters
-   * (across lanes, warps and CTAs):
+   * the efa_cuda_qp ring. Two shared cursors in the QP coordinate all
+   * posters (across lanes, warps and CTAs):
    *
    *   pc             : monotonic reservation index. A group's leader
    *                    claims its whole range with one atomicAdd(+g).
@@ -261,8 +267,25 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
     /* Members in this window write their own WQE into their slot. */
     if (my_idx >= chunk_start && my_idx < chunk_start + chunk_size) {
       uint32_t my_slot = chunk_base + (uint32_t)(my_idx - chunk_start);
-      uint32_t sq_idx  = my_slot & qp->sq.wq.queue_mask;
-      int wqe_phase    = (int)((my_slot >> qp->sq.wq.queue_size_shift) & 1u);
+
+      uint64_t wrSrcAddr = srcAddr;
+      uint32_t wrSrcLkey = srcLkey;
+      if (pvSrcVal != nullptr) {
+        /* PutValue: stage the value into this lane's pool slot, then point
+         * the SGE at it. */
+        uint64_t slot_idx   = (uint64_t)my_slot % (uint64_t)sq_size_val;
+        uint64_t local_addr = pvSliceBase + slot_idx * (uint64_t)pvSlotSize;
+        for (uint32_t b = 0; b < pvValBytes; b++)
+          ((uint8_t *)local_addr)[b] = ((const uint8_t *)pvSrcVal)[b];
+        wrSrcAddr  = local_addr;
+        wrSrcLkey  = pvLkey;
+      }
+
+      /* Only the source SGE is per-lane, the rest of wr was already built above. */
+      efa_cuda_wr_set_sge(&wr, wrSrcLkey, wrSrcAddr, writeBytes);
+
+      uint32_t sq_idx    = my_slot & qp->sq.wq.queue_mask;
+      int      wqe_phase = (int)((my_slot >> qp->sq.wq.queue_size_shift) & 1u);
       EFA_SET(&wr.meta.ctrl2, EFA_IO_TX_META_DESC_PHASE, wqe_phase);
       uint64_t *src = (uint64_t *)&wr;
       uint64_t *dst = (uint64_t *)(qp->sq.wq.buf + sq_idx * sizeof(efa_io_tx_wqe));
@@ -503,6 +526,112 @@ NCCL_DEVICE_INLINE static void putImpl(ncclGinCtx ctx, Coop coop, int peer, bool
   }
 }
 
+/* ── putValueImplMode: mode-templated PutValue implementation ─────── */
+
+template <ncclGinResourceSharingMode mode, typename Coop, typename T>
+NCCL_DEVICE_INLINE static void putValueImplMode(
+    ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin, size_t dstOff, T srcVal,
+    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp, uint64_t signalOpArg,
+    bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
+    cuda::thread_scope required, cuda::thread_scope given, uint32_t optFlags) {
+
+  static_assert(sizeof(T) <= 8, "PutValue: T must fit in 8 bytes");
+  coop.sync();
+  if (coop.thread_rank() == 0) {
+    nccl_ofi_gin_gdaki_dev_handle *dev = getDevHandle(ctx);
+
+    /* This backend supports INDEXED signals only. */
+    assert((signal.type == NCCL_GIN_SIGNAL_TYPE_NONE
+            || signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED)
+           && "EFA GDA: only INDEXED signals are supported");
+
+    /* Resolve the window to this context's rail. */
+    nccl_ofi_gin_gdaki_mr_handle *dstMh =
+      ((nccl_ofi_gin_gdaki_mr_handle **)dstWin)[dev->rail_id];
+
+    /* All PutValues post from the dedicated PutValue endpoint (pvdata). */
+    nccl_ofi_gin_gdaki_dev_endpoint_handle *ep = &dev->pvdata;
+
+    /* Resolve the remote target (ah, qpn, qkey) via pvdata's target table
+     * (targetSlot-major: idx = targetSlot*nranks + peer), same target slots
+     * as Put:
+     *     signalling write (INDEXED) -> slot 1 + signalId (peer sc EP,
+     *       whose FI_REMOTE_WRITE the receiver's waitSignal observes)
+     *     plain value write          -> slot 0 (peer DATA EP, no
+     *       FI_REMOTE_WRITE bound, so no signal fires on the receiver)
+     * The remote tuple is read through pvdata's own AV. */
+    const bool isIndexed = (signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED);
+    const uint32_t targetSlot =
+        isIndexed ? (1u + (uint32_t)signal.indexedSignal.signalId) : 0u;
+    const uint32_t targetIdx = targetSlot * (uint32_t)dev->nranks + (uint32_t)peer;
+    uint16_t ah   = ep->target_address_handles[targetIdx];
+    uint16_t qpn  = ep->target_remote_qpns[targetIdx];
+    uint32_t qkey = ep->target_qkey[targetIdx];
+
+    /* Signal increment count, mirroring Put: Inc (or no signal) is a single
+     * write; an INDEXED Add-by-N expands into N inbound writes. signalOpArg
+     * is defined to be 1 for Inc by the GIN API. */
+    uint32_t signalCount = 1u;
+    if (isIndexed && signalOp == ncclGinSignalAdd) {
+      signalCount = (uint32_t)signalOpArg;
+    }
+
+    uint64_t absDstAddr = dstMh->peers[peer].remote_addr + dstOff;
+    uint32_t dstRkey    = dstMh->peers[peer].rkey;
+
+    /* Value write: stage srcVal into pvdata's pool and RDMA-write it to the
+     * destination. The arrival ticks the target sc EP's FI_REMOTE_WRITE once
+     * (signalled) or no signal (no-signal). */
+    postRdmaWrite<mode>(ep, ah, qpn, qkey, /*srcAddr=*/0, /*srcLkey=*/0,
+                        /*writeBytes=*/(uint32_t)sizeof(T), absDstAddr, dstRkey,
+                        /*optFlags=*/ncclGinOptFlagsDefault,
+                        /*pvSrcVal=*/&srcVal, /*pvValBytes=*/(uint32_t)sizeof(T),
+                        /*pvLkey=*/dev->putvalue_lkey,
+                        /*pvSliceBase=*/ep->putvalue_slice_base,
+                        /*pvSlotSize=*/dev->putvalue_slot_size);
+
+    /* Remaining (signalCount - 1) signal increments: 0-byte writes to
+     * the peer scratch region on the DATA endpoint. The loop body is empty
+     * unless signalCount > 1, which implies an INDEXED Add (and thus a
+     * signal endpoint target). */
+    for (uint32_t k = 1u; k < signalCount; k++) {
+      postRdmaWrite<mode>(ep, ah, qpn, qkey,
+                          dev->scratch_local_addr, dev->scratch_lkey, 0u,
+                          dev->scratch_remote_addrs[peer],
+                          dev->scratch_remote_rkeys[peer]);
+    }
+  }
+  (void)hasDescriptor; (void)descriptor;
+  (void)required; (void)given; (void)optFlags;
+  coop.sync();
+}
+
+/* ── putValueImpl: runtime mode dispatcher ────────────────────────── */
+
+template <typename Coop, typename T>
+NCCL_DEVICE_INLINE static void putValueImpl(ncclGinCtx ctx, Coop coop, int peer,
+                                    ncclGinWindow_t dstWin, size_t dstOff, T srcVal,
+                                    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
+                                    uint64_t signalOpArg, bool hasDescriptor,
+                                    ncclGinDescriptorSmem* descriptor,
+                                    cuda::thread_scope required, cuda::thread_scope given,
+                                    uint32_t optFlags) {
+  switch ((ncclGinResourceSharingMode)ctx.resourceSharingMode) {
+    case NCCL_GIN_RESOURCE_SHARING_CTA:
+      putValueImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(
+        ctx, coop, peer, dstWin, dstOff, srcVal,
+        signal, signalOp, signalOpArg, hasDescriptor, descriptor,
+        required, given, optFlags);
+      break;
+    default:
+      putValueImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(
+        ctx, coop, peer, dstWin, dstOff, srcVal,
+        signal, signalOp, signalOpArg, hasDescriptor, descriptor,
+        required, given, optFlags);
+      break;
+  }
+}
+
 /* ── flushImplMode: mode-templated Flush implementation ───────────── */
 
 template <ncclGinResourceSharingMode mode, typename Coop>
@@ -534,11 +663,15 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
 
     if (!wait_for_endpoint(dev->data)) return;
 
+    /* The dedicated PutValue endpoint is a local poster too (all PutValue
+     * writes ride it), so drain it as well. */
+    if (!wait_for_endpoint(dev->pvdata)) return;
+
     /* Drain the counter endpoints only. With the decoupled model the
-     * local poster QP is always either the data endpoint or a counter
-     * endpoint (counterId selects the poster); a signal endpoint is
-     * only ever a remote TARGET, never a local poster, so its FI_WRITE
-     * counter never ticks from our writes and there is nothing to
+     * local poster QP is always the data endpoint, the PutValue endpoint,
+     * or a counter endpoint (counterId selects the poster); a signal
+     * endpoint is only ever a remote TARGET, never a local poster, so its
+     * FI_WRITE counter never ticks from our writes and there is nothing to
      * drain. A signal QP needs no local completions at all. */
     for (int i = 0; i < dev->nCounters; i++) {
       if (!wait_for_endpoint(dev->counter_handles[i]->base)) return;
@@ -598,14 +731,10 @@ struct ncclGinApi_PutValue<NCCL_NET_DEVICE_GIN_EFA_GDA> {
                                       ncclGinDescriptorSmem* descriptor,
                                       cuda::thread_scope required, cuda::thread_scope given,
                                       uint32_t optFlags = ncclGinOptFlagsDefault) {
-    coop.sync();
-    /* TODO: efa-dp-direct wr_set_inline_data only supports SEND opcode,
-       not RDMA_WRITE. Need either an efa-dp-direct update or a
-       pre-registered scratch buffer approach. */
-    (void)ctx; (void)peer; (void)dstWin; (void)dstOff; (void)srcVal;
-    (void)signal; (void)signalOp; (void)signalOpArg; (void)hasDescriptor;
-    (void)descriptor; (void)required; (void)given; (void)optFlags;
-    coop.sync();
+    nccl::gin::efa_gda::putValueImpl(
+      ctx, coop, peer, dstWin, dstOff, srcVal,
+      signal, signalOp, signalOpArg,
+      hasDescriptor, descriptor, required, given, optFlags);
   }
 };
 
