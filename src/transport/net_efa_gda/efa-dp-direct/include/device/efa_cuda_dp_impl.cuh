@@ -9,8 +9,7 @@
 #include <errno.h>
 #include <stdint.h>
 
-#include "../host/efa_cuda_dp.h"
-#include "../common/efa_io_defs.h"
+#include "efa_cuda_dp.cuh"
 
 #define BIT(nr)		(1UL << (nr))
 
@@ -45,23 +44,23 @@
 	((type *) ((char *)ptr - offsetof(type, field)))
 
 
-__device__ inline int efa_cuda_cqe_is_pending(const efa_io_cdesc_common *cqe_common, int phase)
+__device__ static inline int efa_cuda_cqe_is_pending(const efa_io_cdesc_common *cqe_common, int phase)
 {
 	return EFA_GET(&cqe_common->flags, EFA_IO_CDESC_COMMON_PHASE) == phase;
 }
 
-__device__ inline efa_io_cdesc_common *efa_cuda_get_cqe(efa_cuda_cq *cq, uint32_t position)
+__device__ static inline efa_io_cdesc_common *efa_cuda_get_cqe(efa_cuda_cq *cq, uint32_t position)
 {
 	uint32_t index = (cq->cc + position) & cq->queue_mask;
 	return (efa_io_cdesc_common *)(cq->buf + (index * cq->entry_size));
 }
 
-__device__ inline int efa_cuda_get_cqe_phase(efa_cuda_cq *cq, uint32_t position)
+__device__ static inline int efa_cuda_get_cqe_phase(efa_cuda_cq *cq, uint32_t position)
 {
 	return cq->phase ^ (((cq->cc & cq->queue_mask) + position) >> cq->queue_size_shift);
 }
 
-__device__ void *efa_cuda_cq_poll(efa_cuda_cq *cq, uint32_t position)
+__device__ static inline void *efa_cuda_cq_poll(efa_cuda_cq *cq, uint32_t position)
 {
 	efa_io_cdesc_common *cqe = efa_cuda_get_cqe(cq, position);
 	int cqe_phase = efa_cuda_get_cqe_phase(cq, position);
@@ -73,7 +72,7 @@ __device__ void *efa_cuda_cq_poll(efa_cuda_cq *cq, uint32_t position)
 	}
 	return nullptr;
 }
-__device__ int efa_cuda_cq_pop(efa_cuda_cq *cq, uint32_t amount)
+__device__ static inline int efa_cuda_cq_pop(efa_cuda_cq *cq, uint32_t amount)
 {
 	cq->phase = efa_cuda_get_cqe_phase(cq, amount);
 	cq->cc += amount;
@@ -81,7 +80,7 @@ __device__ int efa_cuda_cq_pop(efa_cuda_cq *cq, uint32_t amount)
 	return 0;
 }
 
-__device__ enum efa_cuda_wc_opcode efa_cuda_wc_read_opcode(void *wc_buf)
+__device__ static inline enum efa_cuda_wc_opcode efa_cuda_wc_read_opcode(void *wc_buf)
 {
 	enum efa_io_send_op_type op_type;
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
@@ -104,35 +103,35 @@ __device__ enum efa_cuda_wc_opcode efa_cuda_wc_read_opcode(void *wc_buf)
 	return EFA_CUDA_WC_RECV;
 }
 
-__device__ bool efa_cuda_wc_is_unsolicited(void *wc_buf)
+__device__ static inline bool efa_cuda_wc_is_unsolicited(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 
 	return EFA_GET(&cqe->flags, EFA_IO_CDESC_COMMON_UNSOLICITED);
 }
 
-__device__ uint16_t efa_cuda_wc_read_req_id(void *wc_buf)
+__device__ static inline uint16_t efa_cuda_wc_read_req_id(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 
 	return cqe->req_id;
 }
 
-__device__ uint32_t efa_cuda_wc_read_vendor_err(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_vendor_err(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 
 	return cqe->status;
 }
 
-__device__ bool efa_cuda_wc_has_imm(void *wc_buf)
+__device__ static inline bool efa_cuda_wc_has_imm(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 
 	return EFA_GET(&cqe->flags, EFA_IO_CDESC_COMMON_HAS_IMM);
 }
 
-__device__ uint32_t efa_cuda_wc_read_imm_data(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_imm_data(void *wc_buf)
 {
 	struct efa_io_rx_cdesc *rcqe;
 
@@ -141,7 +140,7 @@ __device__ uint32_t efa_cuda_wc_read_imm_data(void *wc_buf)
 	return rcqe->imm;
 }
 
-__device__ uint32_t efa_cuda_wc_read_byte_len(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_byte_len(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 	struct efa_io_rx_cdesc_ex *rcqe;
@@ -159,14 +158,14 @@ __device__ uint32_t efa_cuda_wc_read_byte_len(void *wc_buf)
 	return length;
 }
 
-__device__ uint32_t efa_cuda_wc_read_qp_num(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_qp_num(void *wc_buf)
 {
 	struct efa_io_cdesc_common *cqe = (struct efa_io_cdesc_common *)wc_buf;
 
 	return cqe->qp_num;
 }
 
-__device__ uint32_t efa_cuda_wc_read_src_qp(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_src_qp(void *wc_buf)
 {
 	struct efa_io_rx_cdesc *rcqe;
 
@@ -175,7 +174,7 @@ __device__ uint32_t efa_cuda_wc_read_src_qp(void *wc_buf)
 	return rcqe->src_qp_num;
 }
 
-__device__ uint32_t efa_cuda_wc_read_slid(void *wc_buf)
+__device__ static inline uint32_t efa_cuda_wc_read_slid(void *wc_buf)
 {
 	struct efa_io_rx_cdesc *rcqe;
 
@@ -184,7 +183,7 @@ __device__ uint32_t efa_cuda_wc_read_slid(void *wc_buf)
 	return rcqe->ah;
 }
 
-__device__ int efa_cuda_sq_init_wr(void *wr_buf, enum efa_io_send_op_type op_type, uint16_t wr_id)
+__device__ static inline int efa_cuda_sq_init_wr(void *wr_buf, enum efa_io_send_op_type op_type, uint16_t wr_id)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 
@@ -200,7 +199,7 @@ __device__ int efa_cuda_sq_init_wr(void *wr_buf, enum efa_io_send_op_type op_typ
 	return 0;
 }
 
-__device__ void efa_cuda_set_wqe_imm_data(void *wr_buf, uint32_t imm_data)
+__device__ static inline void efa_cuda_set_wqe_imm_data(void *wr_buf, uint32_t imm_data)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 
@@ -208,14 +207,14 @@ __device__ void efa_cuda_set_wqe_imm_data(void *wr_buf, uint32_t imm_data)
 	EFA_SET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_HAS_IMM, 1);
 }
 
-__device__ void efa_cuda_set_remote_mem(struct efa_io_remote_mem_addr *remote_mem, uint32_t rkey, uint64_t remote_addr)
+__device__ static inline void efa_cuda_set_remote_mem(struct efa_io_remote_mem_addr *remote_mem, uint32_t rkey, uint64_t remote_addr)
 {
 	remote_mem->rkey = rkey;
 	remote_mem->buf_addr_lo = remote_addr & 0xFFFFFFFF;
 	remote_mem->buf_addr_hi = remote_addr >> 32;
 }
 
-__device__ void efa_cuda_set_tx_buf(struct efa_io_tx_buf_desc *tx_buf, uint64_t addr, uint32_t lkey, uint32_t length)
+__device__ static inline void efa_cuda_set_tx_buf(struct efa_io_tx_buf_desc *tx_buf, uint64_t addr, uint32_t lkey, uint32_t length)
 {
 	tx_buf->length = length;
 	EFA_SET(&tx_buf->lkey, EFA_IO_TX_BUF_DESC_LKEY, lkey);
@@ -223,12 +222,12 @@ __device__ void efa_cuda_set_tx_buf(struct efa_io_tx_buf_desc *tx_buf, uint64_t 
 	tx_buf->buf_addr_hi = addr >> 32;
 }
 
-__device__ int efa_cuda_init_send_wr(void *wr_buf, uint16_t wr_id)
+__device__ static inline int efa_cuda_init_send_wr(void *wr_buf, uint16_t wr_id)
 {
 	return efa_cuda_sq_init_wr(wr_buf, EFA_IO_SEND, wr_id);
 }
 
-__device__ int efa_cuda_init_send_imm_wr(void *wr_buf, uint16_t wr_id, uint32_t imm_data)
+__device__ static inline int efa_cuda_init_send_imm_wr(void *wr_buf, uint16_t wr_id, uint32_t imm_data)
 {
 	int ret;
 
@@ -241,7 +240,7 @@ __device__ int efa_cuda_init_send_imm_wr(void *wr_buf, uint16_t wr_id, uint32_t 
 	return 0;
 }
 
-__device__ int efa_cuda_init_rdma_read_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr)
+__device__ static inline int efa_cuda_init_rdma_read_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 	int ret;
@@ -255,7 +254,7 @@ __device__ int efa_cuda_init_rdma_read_wr(void *wr_buf, uint16_t wr_id, uint32_t
 	return 0;
 }
 
-__device__ int efa_cuda_init_rdma_write_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr)
+__device__ static inline int efa_cuda_init_rdma_write_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 	int ret;
@@ -269,7 +268,7 @@ __device__ int efa_cuda_init_rdma_write_wr(void *wr_buf, uint16_t wr_id, uint32_
 	return 0;
 }
 
-__device__ int efa_cuda_init_rdma_write_imm_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr, uint32_t imm_data)
+__device__ static inline int efa_cuda_init_rdma_write_imm_wr(void *wr_buf, uint16_t wr_id, uint32_t rkey, uint64_t remote_addr, uint32_t imm_data)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 	int ret;
@@ -284,7 +283,7 @@ __device__ int efa_cuda_init_rdma_write_imm_wr(void *wr_buf, uint16_t wr_id, uin
 	return 0;
 }
 
-__device__ void efa_cuda_wr_set_remote(void *wr_buf, uint16_t ah, uint32_t remote_qpn, uint32_t remote_qkey)
+__device__ static inline void efa_cuda_wr_set_remote(void *wr_buf, uint16_t ah, uint32_t remote_qpn, uint32_t remote_qkey)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 
@@ -293,7 +292,7 @@ __device__ void efa_cuda_wr_set_remote(void *wr_buf, uint16_t ah, uint32_t remot
 	wqe->meta.qkey = remote_qkey;
 }
 
-__device__ int efa_cuda_wr_set_inline_data(void *wr_buf, void *addr, size_t length)
+__device__ static inline int efa_cuda_wr_set_inline_data(void *wr_buf, void *addr, size_t length)
 {
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
 	uint8_t op_type;
@@ -312,7 +311,7 @@ __device__ int efa_cuda_wr_set_inline_data(void *wr_buf, void *addr, size_t leng
 	return 0;
 }
 
-__device__ int efa_cuda_wr_set_sge(void *wr_buf, uint32_t lkey, uint64_t addr, uint32_t length)
+__device__ static inline int efa_cuda_wr_set_sge(void *wr_buf, uint32_t lkey, uint64_t addr, uint32_t length)
 {
 	struct efa_io_tx_buf_desc *buf;
 	struct efa_io_tx_wqe *wqe;
@@ -339,12 +338,23 @@ __device__ int efa_cuda_wr_set_sge(void *wr_buf, uint32_t lkey, uint64_t addr, u
 	return 0;
 }
 
-__device__ inline int efa_cuda_get_wqe_phase(efa_cuda_wq *wq, uint32_t index_in_batch)
+__device__ static inline void efa_cuda_wr_set_processing_hints(void *wr_buf, uint32_t hints)
+{
+	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
+	uint32_t io_hints = 0;
+
+	if (hints & EFA_CUDA_PROCESSING_HINT_BURST_PPS_SENSITIVE)
+		io_hints |= EFA_IO_PROCESSING_HINT_BURST_PPS_SENSITIVE;
+
+	EFA_SET(&wqe->meta.ctrl3, EFA_IO_TX_META_DESC_PROCESSING_HINTS, io_hints);
+}
+
+__device__ static inline int efa_cuda_get_wqe_phase(efa_cuda_wq *wq, uint32_t index_in_batch)
 {
 	return wq->phase ^ (((wq->pc & wq->queue_mask) + index_in_batch) >> wq->queue_size_shift);
 }
 
-__device__ void efa_cuda_flush_sq_wrs(efa_cuda_qp *qp)
+__device__ static inline void efa_cuda_flush_sq_wrs(efa_cuda_qp *qp)
 {
 	if (!qp->sq.wq.wqes_pending)
 		return;
@@ -358,7 +368,7 @@ __device__ void efa_cuda_flush_sq_wrs(efa_cuda_qp *qp)
 	__threadfence_system();
 }
 
-__device__ int efa_cuda_start_sq_batch(efa_cuda_qp *qp, int batch_size)
+__device__ static inline int efa_cuda_start_sq_batch(efa_cuda_qp *qp, int batch_size)
 {
 	// TODO: check free space
 
@@ -369,7 +379,7 @@ __device__ int efa_cuda_start_sq_batch(efa_cuda_qp *qp, int batch_size)
 	return 0;
 }
 
-__device__ int efa_cuda_sq_batch_place_wr(efa_cuda_qp *qp, int index_in_batch, void *wr_buf)
+__device__ static inline int efa_cuda_sq_batch_place_wr(efa_cuda_qp *qp, int index_in_batch, void *wr_buf)
 {
 	int wqe_phase = efa_cuda_get_wqe_phase(&qp->sq.wq, index_in_batch);
 	struct efa_io_tx_wqe *wqe = (struct efa_io_tx_wqe *)wr_buf;
@@ -388,7 +398,7 @@ __device__ int efa_cuda_sq_batch_place_wr(efa_cuda_qp *qp, int index_in_batch, v
 	return 0;
 }
 
-__device__ int efa_cuda_post_recv_wr(efa_cuda_qp *qp, uint64_t addr, uint32_t length, uint32_t lkey)
+__device__ static inline int efa_cuda_post_recv_wr(efa_cuda_qp *qp, uint16_t req_id, uint64_t addr, uint32_t length, uint32_t lkey)
 {
 	struct efa_io_rx_desc wqe = {0};
 	uint32_t rq_desc_offset;
@@ -400,6 +410,7 @@ __device__ int efa_cuda_post_recv_wr(efa_cuda_qp *qp, uint64_t addr, uint32_t le
 	wqe.buf_addr_lo = addr;
 	wqe.buf_addr_hi = addr >> 32;
 	wqe.length = length;
+	wqe.req_id = req_id;
 
 	/* Copy descriptor to RX ring */
 	rq_desc_offset = (qp->rq.wq.pc & qp->rq.wq.queue_mask) * sizeof(wqe);
@@ -420,7 +431,7 @@ __device__ int efa_cuda_post_recv_wr(efa_cuda_qp *qp, uint64_t addr, uint32_t le
 	return 0;
 }
 
-__device__ void efa_cuda_flush_rq_wrs(efa_cuda_qp *qp)
+__device__ static inline void efa_cuda_flush_rq_wrs(efa_cuda_qp *qp)
 {
 	if (!qp->rq.wq.wqes_pending)
 		return;
@@ -430,12 +441,12 @@ __device__ void efa_cuda_flush_rq_wrs(efa_cuda_qp *qp)
 	qp->rq.wq.wqes_pending = 0;
 }
 
-__device__ bool efa_cuda_is_cq_compatible(efa_cuda_cq *cq)
+__device__ static inline bool efa_cuda_is_cq_compatible(efa_cuda_cq *cq)
 {
 	return cq->comp_mask == 0;
 }
 
-__device__ bool efa_cuda_is_qp_compatible(efa_cuda_qp *qp)
+__device__ static inline bool efa_cuda_is_qp_compatible(efa_cuda_qp *qp)
 {
 	return qp->comp_mask == 0;
 }
