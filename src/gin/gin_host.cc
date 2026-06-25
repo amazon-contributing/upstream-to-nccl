@@ -243,6 +243,10 @@ ncclResult_t ncclGinDevCommSetup(struct ncclComm* comm, struct ncclDevCommRequir
     backendVersionArray = gpiBackendMinVersions;
     nVersions = sizeof(gpiBackendMinVersions) / sizeof(int);
     break;
+  case NCCL_GIN_TYPE_EFA_GDA:
+    backendVersionArray = proxyBackendMinVersions;
+    nVersions = sizeof(proxyBackendMinVersions) / sizeof(int);
+    break;
   default:
     WARN("Cannot get backend version for invalid GIN type %d", ginState->ginType);
     return ncclInternalError;
