@@ -23,6 +23,7 @@ NCCL_PARAM(DevApiJit, "DEV_API_JIT", 0);
 const int proxyBackendMinVersions[] = {0, NCCL_VERSION(2, 30, 3), NCCL_VERSION(2, 30, 5)};
 const int gdakiBackendMinVersions[] = {0, NCCL_VERSION(2, 30, 3), NCCL_VERSION(2, 30, 5)};
 const int gpiBackendMinVersions[] = {0, NCCL_VERSION(2, 30, 5)};
+const int efaGdaBackendMinVersions[] = {0, NCCL_VERSION(2, 31, 0)};
 
 ncclResult_t ncclGetGinType(struct ncclComm* comm, ncclGinType_t* ginType) {
   if (comm == nullptr || ginType == nullptr) return ncclInternalError;
