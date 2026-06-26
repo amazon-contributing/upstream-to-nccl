@@ -80,6 +80,15 @@ struct nccl_ofi_gin_gdaki_dev_endpoint_handle {
    * until (submitted_count - *local_cntr_value + batch_size)
    * <= sq_size before reserving slots. */
   uint32_t sq_size;
+
+  /* PutValue source-slot pool fields, mirrored from the aws-ofi-nccl
+   * plugin's endpoint handle to keep this struct's layout (ABI) identical
+   * to the plugin's. PutValue is not yet implemented on the NCCL device
+   * side, so the kernel does not read these today; they are reserved so
+   * the PutValue device path can use them without an ABI change. See the
+   * plugin definition (nccl_ofi_gin_gdaki_dev.h) — keep them in sync. */
+  uint32_t putvalue_pad;
+  uint64_t putvalue_slice_base;
 };
 
 /*
@@ -133,6 +142,18 @@ struct nccl_ofi_gin_gdaki_dev_handle {
   int32_t nranks;
   int32_t rank;
 
+  /* Multi-rail: the rail (EFA NIC) this logical context is bound to.
+   * The plugin opens this context's endpoints on rail rail_id's domain
+   * and bakes that rail's scratch / putvalue MR keys into this handle.
+   * The kernel uses rail_id only to index the per-rail memory handle
+   * array that regMrSym returns as the window (see Put/PutValue); all
+   * endpoint / counter / scratch / putvalue fields here are already
+   * rail-resolved, so the rest of the device path is rail-agnostic.
+   *
+   * The plugin sets rail_id = contextId % num_rails, so on a
+   * 2-NIC-per-GPU node distinct contextIds spread across both NICs. */
+  uint32_t rail_id;
+
   /* Per-context signal-only scratch buffer, used by Put when the
    * caller has no payload (hasWins=false || bytes=0) but has
    * requested a signal/counter. EFA's RDMA write needs a real
@@ -151,6 +172,14 @@ struct nccl_ofi_gin_gdaki_dev_handle {
   uint64_t scratch_local_addr;
   uint64_t *scratch_remote_addrs;
   uint32_t *scratch_remote_rkeys;
+
+  /* PutValue source-slot pool metadata (lkey + per-slot stride),
+   * mirrored from the plugin's dev handle to keep the layout (ABI)
+   * identical. Reserved for the PutValue device path, which is not yet
+   * implemented on the NCCL side; the kernel does not read these today.
+   * Keep in sync with nccl_ofi_gin_gdaki_dev.h. */
+  uint32_t putvalue_lkey;
+  uint32_t putvalue_slot_size;
 };
 
 /*
@@ -171,5 +200,14 @@ struct nccl_ofi_gin_gdaki_mr_handle {
   uint64_t local_addr;                       /* local base VA for this MR */
   struct nccl_ofi_gin_gdaki_mr_peer peers[]; /* [nranks] flex array */
 };
+
+/* regMrSym registers a window's memory once per rail (each rail has its
+ * own libfabric domain, hence its own lkey and the peer's per-rail rkey)
+ * and returns, as the window handle, an array of per-rail mr_handle
+ * pointers: (nccl_ofi_gin_gdaki_mr_handle *)[num_rails]. The kernel
+ * selects the handle for the rail its logical context is bound to by
+ * indexing that array with dev->rail_id — see Put/PutValue. The caller
+ * therefore selects the rail purely by which contextId (hence which
+ * dev_handle) it issues through; the rest of the path is rail-agnostic. */
 
 #endif /* _NCCL_DEVICE_GIN_EFA_GDA_DEV_H_ */
