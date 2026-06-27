@@ -368,6 +368,24 @@ __device__ static inline void efa_cuda_flush_sq_wrs(efa_cuda_qp *qp)
 	__threadfence_system();
 }
 
+/* Ring the doorbell for whatever the released cursor (wqes_completed) has
+ * committed so far. Releases WQEs that the inlined GIN post path committed
+ * with the doorbell deferred (ncclGinOptFlagsAggregateRequests): those
+ * posts advanced wqes_completed in slot order but skipped *db = cursor and
+ * set db_pending. A true no-op when nothing was deferred (db_pending == 0),
+ * so it is safe to call on every endpoint from ncclGinApi_Flush. Gating on
+ * db_pending is essential: an unconditional re-ring of *db on an endpoint
+ * with no deferred work desyncs the lock-free SQ and hangs the collective. */
+__device__ static inline void efa_cuda_ring_db(efa_cuda_qp *qp)
+{
+	if (qp->sq.wq.db_pending) {
+		__threadfence_system();
+		*qp->sq.wq.db = qp->sq.wq.wqes_completed;
+		__threadfence_system();
+		qp->sq.wq.db_pending = 0;
+	}
+}
+
 __device__ static inline int efa_cuda_start_sq_batch(efa_cuda_qp *qp, int batch_size)
 {
 	// TODO: check free space

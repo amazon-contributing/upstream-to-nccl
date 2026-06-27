@@ -95,7 +95,8 @@ template <ncclGinResourceSharingMode mode>
 NCCL_DEVICE_INLINE static void postRdmaWrite(
     nccl_ofi_gin_gdaki_dev_endpoint_handle *ep, uint16_t ah, uint16_t qpn,
     uint32_t qkey, uint64_t srcAddr, uint32_t srcLkey, uint32_t writeBytes,
-    uint64_t dstAddr, uint32_t dstRkey) {
+    uint64_t dstAddr, uint32_t dstRkey,
+    uint32_t optFlags = ncclGinOptFlagsDefault) {
 
   efa_cuda_qp       *qp                  = (efa_cuda_qp *)ep->qp;
   uint64_t          *submitted_count_ptr  = &ep->submitted_count;
@@ -203,8 +204,23 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
       while (base_ref.load(cuda::memory_order_acquire) != chunk_base) {
         /* spin */
       }
-      *qp->sq.wq.db = chunk_next;
-      __threadfence_system();   /* drain/order the doorbell write */
+      /* Ring the doorbell unless the caller is aggregating.
+       * ncclGinOptFlagsAggregateRequests signals that more posts to this
+       * QP are coming and the application wants one MMIO doorbell per
+       * burst. The released cursor (wqes_completed, advanced below) is
+       * still committed in slot order, so the next non-aggregate post on
+       * this QP — or an explicit ncclGinApi_Flush via efa_cuda_ring_db —
+       * writes *db = wqes_completed and releases the whole accumulated
+       * range at once. Only the MMIO write is deferred; the cursor
+       * hand-off below must always happen or the next poster's
+       * rendezvous spin would deadlock. */
+      if (optFlags & ncclGinOptFlagsAggregateRequests) {
+        qp->sq.wq.db_pending = 1;
+      } else {
+        *qp->sq.wq.db = chunk_next;
+        __threadfence_system();   /* drain/order the doorbell write */
+        qp->sq.wq.db_pending = 0;
+      }
       scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)chunk_size);
       base_ref.store(chunk_next, cuda::memory_order_release);   /* hand off to next group */
     }
@@ -358,7 +374,7 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * fires once. absSrcAddr/absDstAddr/writeBytes already point at the
        * payload or the scratch region per the hasPayload branch above. */
       postRdmaWrite<mode>(main_ep, main_ah, main_qpn, main_qkey, absSrcAddr, srcLkey,
-                          writeBytes, absDstAddr, dstRkey);
+                          writeBytes, absDstAddr, dstRkey, optFlags);
 
       /* Remaining (signalCount - 1) signal increments: 0-byte writes to
        * the peer scratch region on the DATA endpoint, so the caller's
@@ -369,12 +385,12 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
         postRdmaWrite<mode>(&dev->data, dataSigAh, dataSigQpn, dataSigQkey,
                             dev->scratch_local_addr, dev->scratch_lkey, 0u,
                             dev->scratch_remote_addrs[peer],
-                            dev->scratch_remote_rkeys[peer]);
+                            dev->scratch_remote_rkeys[peer], optFlags);
       }
     }
   }
   (void)hasDescriptor; (void)descriptor;
-  (void)required; (void)given; (void)optFlags;
+  (void)required; (void)given;
   coop.sync();
 }
 
@@ -415,13 +431,24 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
   if (coop.thread_rank() == 0) {
     nccl_ofi_gin_gdaki_dev_handle *dev = getDevHandle(ctx);
 
-    /* For each endpoint with outstanding work, snapshot submitted_count
-     * (scoped atomic load matching the relaxed bumps from the post
-     * path), then spin on the NIC-written FI_WRITE counter until it
-     * reaches the snapshot. The HW counter is read with system-scope
-     * acquire so the GPU bypasses caches and observes the latest NIC
-     * update through PCIe-coherent memory. */
+    /* For each endpoint with outstanding work: first ring any doorbell a
+     * prior ncclGinOptFlagsAggregateRequests post left deferred, then
+     * snapshot submitted_count (scoped atomic load matching the relaxed
+     * bumps from the post path) and spin on the NIC-written FI_WRITE
+     * counter until it reaches the snapshot.
+     *
+     * The doorbell ring is mandatory before the spin: a deferred aggregate
+     * post advanced submitted_count (so target reflects it) and committed
+     * the slots (wqes_completed advanced) but did NOT write *db, so the NIC
+     * never saw the work — without ringing here the spin would never
+     * converge. efa_cuda_ring_db is a no-op when nothing was deferred
+     * (db_pending == 0).
+     *
+     * The HW counter is read with system-scope acquire so the GPU bypasses
+     * caches and observes the latest NIC update through PCIe-coherent
+     * memory. */
     auto wait_for_endpoint = [abortFlag](nccl_ofi_gin_gdaki_dev_endpoint_handle &ep) -> bool {
+      efa_cuda_ring_db((efa_cuda_qp *)ep.qp);
       uint64_t target = scopedAtomicLoad<ncclGinScope<mode>, cuda::memory_order_relaxed>(&ep.submitted_count);
 
       /* Drain-to-zero: outstanding = (submitted - completed) reduced to

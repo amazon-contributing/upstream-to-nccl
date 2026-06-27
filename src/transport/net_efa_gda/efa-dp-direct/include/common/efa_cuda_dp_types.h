@@ -35,6 +35,9 @@ struct efa_cuda_wq {
 	int phase;
 	uint8_t *buf;
 	uint32_t *db;
+	uint32_t db_pending;   /* set when a post committed the cursor without ringing
+				* the doorbell (ncclGinOptFlagsAggregateRequests);
+				* efa_cuda_ring_db rings *db and clears this. */
 };
 
 struct efa_cuda_rq {
