@@ -112,6 +112,13 @@ DOCA_LIBSRC      := doca_verbs_qp.cpp doca_verbs_cq.cpp doca_verbs_device_attr.c
 DOCA_LIBOBJ      := $(DOCA_LIBSRC:%.cpp=$(DOCA_OBJDIR)/%.o)
 LIBOBJ           += $(DOCA_LIBOBJ)
 
+# EFA-DP-Direct device header installation (mirrors DOCA pattern above)
+EFA_DP_DIRECT_HOME        := transport/net_efa_gda/efa-dp-direct
+EFA_DP_DIRECT_INC_INSTALL := $(INCDIR)/nccl_device/transport/net_efa_gda/efa-dp-direct
+EFA_DP_DIRECT_INCLUDES    := $(wildcard $(EFA_DP_DIRECT_HOME)/include/device/*.cuh) $(wildcard $(EFA_DP_DIRECT_HOME)/include/device/*.h) $(wildcard $(EFA_DP_DIRECT_HOME)/include/common/*.h)
+EFA_DP_DIRECT_INCTARGETS  := $(EFA_DP_DIRECT_INCLUDES:$(EFA_DP_DIRECT_HOME)/include/%=$(EFA_DP_DIRECT_INC_INSTALL)/include/%)
+INCTARGETS                += $(EFA_DP_DIRECT_INCTARGETS)
+
 ##### rules
 build : lib staticlib binary
 
@@ -218,6 +225,21 @@ $(INCDIR)/nccl_device/gin/proxy/%.h: include/nccl_device/gin/proxy/%.h
 $(INCDIR)/nccl_device/gin/efa_gda/%.h: include/nccl_device/gin/efa_gda/%.h
 	@printf "Grabbing   %-35s > %s\n" $< $@
 	mkdir -p $(INCDIR)/nccl_device/gin/efa_gda
+	install -m 644 $< $@
+
+$(EFA_DP_DIRECT_INC_INSTALL)/include/device/%.cuh: $(EFA_DP_DIRECT_HOME)/include/device/%.cuh
+	@printf "Grabbing   %-35s > %s\n" $< $@
+	mkdir -p $(EFA_DP_DIRECT_INC_INSTALL)/include/device
+	install -m 644 $< $@
+
+$(EFA_DP_DIRECT_INC_INSTALL)/include/device/%.h: $(EFA_DP_DIRECT_HOME)/include/device/%.h
+	@printf "Grabbing   %-35s > %s\n" $< $@
+	mkdir -p $(EFA_DP_DIRECT_INC_INSTALL)/include/device
+	install -m 644 $< $@
+
+$(EFA_DP_DIRECT_INC_INSTALL)/include/common/%.h: $(EFA_DP_DIRECT_HOME)/include/common/%.h
+	@printf "Grabbing   %-35s > %s\n" $< $@
+	mkdir -p $(EFA_DP_DIRECT_INC_INSTALL)/include/common
 	install -m 644 $< $@
 
 $(DOCA_INC_INSTALL)/%.h: $(DOCA_HOME)/include/%.h
