@@ -11,7 +11,9 @@
 
 #include "efa_cuda_dp.cuh"
 
+#ifndef BIT
 #define BIT(nr)		(1UL << (nr))
+#endif
 
 #define __bf_shf(x)	(__builtin_ffsll(x) - 1)
 
