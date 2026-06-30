@@ -144,22 +144,17 @@ struct nccl_ofi_gin_gdaki_dev_handle {
 
   /* Per-context signal-only scratch buffer, used by Put when the
    * caller has no payload (hasWins=false || bytes=0) but has
-   * requested a signal/counter. EFA's RDMA write needs a real
-   * remote address to bump the receiver's FI_REMOTE_WRITE counter,
-   * so the plugin allocates a small buffer per createContext,
-   * registers it on the proxy domain, and allgathers the
-   * (local_addr, rkey) per rank. The kernel posts a 0-byte RDMA
-   * write to the peer's scratch on the signal endpoint; the buffer
-   * content is never read.
-   *
-   * scratch_remote_addrs / scratch_remote_rkeys are [nranks] arrays
-   * in GPU memory.
+   * requested a signal/counter. The kernel posts a 0-byte RDMA write
+   * whose arrival bumps the receiver's FI_REMOTE_WRITE counter on the
+   * signal endpoint. A 0-byte write touches no remote memory, so the
+   * remote target address/rkey are zero; only a valid LOCAL source is
+   * required, which is this registered scratch buffer (scratch_local_addr
+   * + scratch_lkey). The buffer content is never read, and no per-peer
+   * remote (addr, rkey) exchange is needed.
    */
   uint32_t scratch_lkey;
   uint32_t scratch_pad;
   uint64_t scratch_local_addr;
-  uint64_t *scratch_remote_addrs;
-  uint32_t *scratch_remote_rkeys;
 
   /* PutValue source-slot pool metadata (lkey + per-slot stride),
    * mirrored from the plugin's dev handle to keep the layout (ABI)
