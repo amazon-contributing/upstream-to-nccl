@@ -252,8 +252,10 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        *     so the receiver's FI_REMOTE_WRITE fires on completion;
        *     otherwise routed through the data endpoint.
        *
-       * (b) Signal-only: posts a 0-byte RDMA write into the peer's
-       *     per-context scratch buffer. The write event bumps the
+       * (b) Signal-only: posts a 0-byte RDMA write. A 0-byte write
+       *     touches no remote memory, so the target (addr, rkey) is
+       *     zero; only a valid LOCAL source is required (this rank's
+       *     registered scratch buffer). The write event alone bumps the
        *     receiver's FI_REMOTE_WRITE counter on the signal endpoint. */
       uint64_t absSrcAddr;
       uint64_t absDstAddr;
@@ -270,8 +272,8 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
         writeBytes = (uint32_t)bytes;
       } else {
         absSrcAddr = dev->scratch_local_addr;
-        absDstAddr = dev->scratch_remote_addrs[peer];
-        dstRkey    = dev->scratch_remote_rkeys[peer];
+        absDstAddr = 0;
+        dstRkey    = 0;
         srcLkey    = dev->scratch_lkey;
         writeBytes = 0;
       }
@@ -368,8 +370,7 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
       for (uint32_t k = 1u; k < signalCount; k++) {
         postRdmaWrite<mode>(&dev->data, dataSigAh, dataSigQpn, dataSigQkey,
                             dev->scratch_local_addr, dev->scratch_lkey, 0u,
-                            dev->scratch_remote_addrs[peer],
-                            dev->scratch_remote_rkeys[peer]);
+                            /*dstAddr=*/0, /*dstRkey=*/0);
       }
     }
   }
