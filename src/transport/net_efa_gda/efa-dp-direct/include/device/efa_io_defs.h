@@ -370,36 +370,36 @@ struct efa_io_rx_cdesc_ex {
 
 /* tx_meta_desc */
 #define EFA_IO_TX_META_DESC_OP_TYPE_MASK                    GENMASK(3, 0)
-#define EFA_IO_TX_META_DESC_HAS_IMM_MASK                    BIT(4)
-#define EFA_IO_TX_META_DESC_INLINE_MSG_MASK                 BIT(5)
-#define EFA_IO_TX_META_DESC_META_EXTENSION_MASK             BIT(6)
-#define EFA_IO_TX_META_DESC_META_DESC_MASK                  BIT(7)
-#define EFA_IO_TX_META_DESC_PHASE_MASK                      BIT(0)
-#define EFA_IO_TX_META_DESC_FIRST_MASK                      BIT(2)
-#define EFA_IO_TX_META_DESC_LAST_MASK                       BIT(3)
-#define EFA_IO_TX_META_DESC_COMP_REQ_MASK                   BIT(4)
+#define EFA_IO_TX_META_DESC_HAS_IMM_MASK                    EFA_BIT(4)
+#define EFA_IO_TX_META_DESC_INLINE_MSG_MASK                 EFA_BIT(5)
+#define EFA_IO_TX_META_DESC_META_EXTENSION_MASK             EFA_BIT(6)
+#define EFA_IO_TX_META_DESC_META_DESC_MASK                  EFA_BIT(7)
+#define EFA_IO_TX_META_DESC_PHASE_MASK                      EFA_BIT(0)
+#define EFA_IO_TX_META_DESC_FIRST_MASK                      EFA_BIT(2)
+#define EFA_IO_TX_META_DESC_LAST_MASK                       EFA_BIT(3)
+#define EFA_IO_TX_META_DESC_COMP_REQ_MASK                   EFA_BIT(4)
 #define EFA_IO_TX_META_DESC_PROCESSING_HINTS_MASK           GENMASK(1, 0)
 
 /* tx_buf_desc */
 #define EFA_IO_TX_BUF_DESC_LKEY_MASK                        GENMASK(23, 0)
 
 /* fast_mr_reg_req */
-#define EFA_IO_FAST_MR_REG_REQ_LOCAL_WRITE_ENABLE_MASK      BIT(0)
-#define EFA_IO_FAST_MR_REG_REQ_REMOTE_WRITE_ENABLE_MASK     BIT(1)
-#define EFA_IO_FAST_MR_REG_REQ_REMOTE_READ_ENABLE_MASK      BIT(2)
+#define EFA_IO_FAST_MR_REG_REQ_LOCAL_WRITE_ENABLE_MASK      EFA_BIT(0)
+#define EFA_IO_FAST_MR_REG_REQ_REMOTE_WRITE_ENABLE_MASK     EFA_BIT(1)
+#define EFA_IO_FAST_MR_REG_REQ_REMOTE_READ_ENABLE_MASK      EFA_BIT(2)
 #define EFA_IO_FAST_MR_REG_REQ_PHYS_PAGE_SIZE_SHIFT_MASK    GENMASK(4, 0)
 #define EFA_IO_FAST_MR_REG_REQ_PBL_MODE_MASK                GENMASK(6, 5)
 
 /* rx_desc */
 #define EFA_IO_RX_DESC_LKEY_MASK                            GENMASK(23, 0)
-#define EFA_IO_RX_DESC_FIRST_MASK                           BIT(30)
-#define EFA_IO_RX_DESC_LAST_MASK                            BIT(31)
+#define EFA_IO_RX_DESC_FIRST_MASK                           EFA_BIT(30)
+#define EFA_IO_RX_DESC_LAST_MASK                            EFA_BIT(31)
 
 /* cdesc_common */
-#define EFA_IO_CDESC_COMMON_PHASE_MASK                      BIT(0)
+#define EFA_IO_CDESC_COMMON_PHASE_MASK                      EFA_BIT(0)
 #define EFA_IO_CDESC_COMMON_Q_TYPE_MASK                     GENMASK(2, 1)
-#define EFA_IO_CDESC_COMMON_HAS_IMM_MASK                    BIT(3)
+#define EFA_IO_CDESC_COMMON_HAS_IMM_MASK                    EFA_BIT(3)
 #define EFA_IO_CDESC_COMMON_OP_TYPE_MASK                    GENMASK(6, 4)
-#define EFA_IO_CDESC_COMMON_UNSOLICITED_MASK                BIT(7)
+#define EFA_IO_CDESC_COMMON_UNSOLICITED_MASK                EFA_BIT(7)
 
 #endif /* _EFA_IO_H_ */
