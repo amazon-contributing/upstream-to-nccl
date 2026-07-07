@@ -215,6 +215,11 @@ $(INCDIR)/nccl_device/gin/proxy/%.h: include/nccl_device/gin/proxy/%.h
 	mkdir -p $(INCDIR)/nccl_device/gin/proxy
 	install -m 644 $< $@
 
+$(INCDIR)/nccl_device/gin/efa_gda/%.h: include/nccl_device/gin/efa_gda/%.h
+	@printf "Grabbing   %-35s > %s\n" $< $@
+	mkdir -p $(INCDIR)/nccl_device/gin/efa_gda
+	install -m 644 $< $@
+
 $(DOCA_INC_INSTALL)/%.h: $(DOCA_HOME)/include/%.h
 	@printf "Grabbing   %-35s > %s\n" $< $@
 	mkdir -p $(DOCA_INC_INSTALL)

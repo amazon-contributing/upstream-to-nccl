@@ -336,6 +336,7 @@ static int ncclGetBackendPriority(struct ncclGinBackendState* backend) {
     return 0;
   case NCCL_GIN_TYPE_PROXY:
     return 1;
+  case NCCL_GIN_TYPE_EFA_GDA:
   case NCCL_GIN_TYPE_GPI:
     return 2;
   default:

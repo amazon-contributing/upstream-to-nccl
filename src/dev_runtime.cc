@@ -1046,6 +1046,10 @@ static void ncclDevCommGdakiDump(void* handle) {
   }
 }
 
+static void ncclDevCommEfaGdaDump(void* handle) {
+  printf("    EFA_GDA handle %p\n", handle);
+}
+
 #include "nccl_device/gin/proxy/gin_proxy_device_host_common.h"
 static void ncclDevCommProxyDump(void* handle) {
   ncclGinProxyGpuCtx_t ctx;
@@ -1057,6 +1061,9 @@ static void ncclDevCommProxyDump(void* handle) {
 #elif defined(NCCL_OS_WINDOWS)
 static void ncclDevCommGdakiDump(void* handle) {
   printf("    GDAKI handle %p (detailed dump not available on Windows)\n", handle);
+}
+static void ncclDevCommEfaGdaDump(void* handle) {
+  printf("    EFA_GDA handle %p (detailed dump not available on Windows)\n", handle);
 }
 static void ncclDevCommProxyDump(void* handle) {
   printf("    PROXY handle %p (detailed dump not available on Windows)\n", handle);
@@ -1075,6 +1082,7 @@ void ncclDevCommDump(struct ncclDevComm* devComm) {
   for (int c = 0; c < devComm->ginConnectionCount; c++) {
     printf("   [%d] %d %p\n", c, devComm->ginNetDeviceTypes[c], devComm->ginHandles[c]);
     if (devComm->ginNetDeviceTypes[c] == NCCL_GIN_TYPE_GDAKI) ncclDevCommGdakiDump(devComm->ginHandles[c]);
+    if (devComm->ginNetDeviceTypes[c] == NCCL_GIN_TYPE_EFA_GDA) ncclDevCommEfaGdaDump(devComm->ginHandles[c]);
     if (devComm->ginNetDeviceTypes[c] == NCCL_GIN_TYPE_PROXY) ncclDevCommProxyDump(devComm->ginHandles[c]);
   }
   printf("  Signals  %d shadows %p\n", devComm->ginSignalCount, devComm->ginSignalShadows);
