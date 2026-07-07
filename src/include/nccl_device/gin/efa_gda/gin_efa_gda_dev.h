@@ -142,6 +142,18 @@ struct nccl_ofi_gin_gdaki_dev_handle {
   int32_t nranks;
   int32_t rank;
 
+  /* Multi-rail: the rail (EFA NIC) this logical context is bound to.
+   * The plugin opens this context's endpoints on rail rail_id's domain
+   * and bakes that rail's scratch MR keys into this handle. The kernel
+   * uses rail_id only to index the per-rail memory handle array that
+   * regMrSym returns as the window (see Put); all endpoint / counter /
+   * scratch fields here are already rail-resolved, so the rest of the
+   * device path is rail-agnostic.
+   *
+   * The plugin sets rail_id = contextId % num_rails, so on a
+   * 2-NIC-per-GPU node distinct contextIds spread across both NICs. */
+  uint32_t rail_id;
+
   /* Per-context signal-only scratch buffer, used by Put when the
    * caller has no payload (hasWins=false || bytes=0) but has
    * requested a signal/counter. EFA's RDMA write needs a real
