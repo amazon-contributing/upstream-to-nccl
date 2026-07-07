@@ -83,6 +83,37 @@ NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t *ptr) {
   return scopedAtomicLoad<cuda::thread_scope_system, cuda::memory_order_acquire>(ptr);
 }
 
+/* ── ringDoorbell: shared doorbell-ring used by the post-path ring sites ─
+
+ * Rings the SQ doorbell to `target`, then advances the bookkeeping cursors:
+ * submitted_count grows by the newly-rung span (target - db_rung) so Flush's
+ * completion wait is exact, and db_rung (wqes_posted) is published to record
+ * how far the doorbell has been rung.
+ *
+ * Preconditions the caller must satisfy:
+ *   - The caller is allowed to ring up to `target` (it holds the doorbell
+ *     turn, or is draining already-handed-off slots).
+ *   - Every WQE in [db_rung, target) is already visible to the NIC. Each
+ *     producing group publishes its own WQEs with __threadfence_system()
+ *     before handoff, so the WQE data is system-visible by the time any slot
+ *     is eligible to be rung here.
+ *
+ * Only a post-doorbell fence is emitted (to order the doorbell MMIO write).
+ * A pre-doorbell publish fence would be useless: __threadfence_system()
+ * orders only the calling thread's own writes, and the WQEs being rung were
+ * written by other threads. */
+template <ncclGinResourceSharingMode mode>
+NCCL_DEVICE_INLINE static void ringDoorbell(
+    efa_cuda_qp *qp, uint64_t *submitted_count_ptr,
+    cuda::atomic_ref<uint32_t, ncclGinScope<mode>> &dbrung_ref,
+    uint32_t db_rung, uint32_t target) {
+  *qp->sq.wq.db = target;
+  __threadfence_system();   /* order the doorbell MMIO write */
+  scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(
+      submitted_count_ptr, (uint64_t)(target - db_rung));
+  dbrung_ref.store(target, cuda::memory_order_release);
+}
+
 /* ── postRdmaWrite: shared post path for Put and PutValue ─────────── */
 
 /* Posts an RDMA write on `ep`'s local QP (its FI_WRITE counter tracks
@@ -95,7 +126,7 @@ template <ncclGinResourceSharingMode mode>
 NCCL_DEVICE_INLINE static void postRdmaWrite(
     nccl_ofi_gin_gdaki_dev_endpoint_handle *ep, uint16_t ah, uint16_t qpn,
     uint32_t qkey, uint64_t srcAddr, uint32_t srcLkey, uint32_t writeBytes,
-    uint64_t dstAddr, uint32_t dstRkey) {
+    uint64_t dstAddr, uint32_t dstRkey, uint32_t optFlags = ncclGinOptFlagsDefault) {
 
   efa_cuda_qp       *qp                  = (efa_cuda_qp *)ep->qp;
   uint64_t          *submitted_count_ptr  = &ep->submitted_count;
@@ -117,9 +148,21 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
    *
    *   pc             : monotonic reservation index. A group's leader
    *                    claims its whole range with one atomicAdd(+g).
-   *   wqes_completed : "released" cursor — the doorbell has been rung
-   *                    up to here. Doubles as the sliding-window base
-   *                    and the doorbell-order rendezvous token.
+   *   wqes_completed : "released" cursor — the rendezvous/handoff token.
+   *                    Advances when a group passes the doorbell turn,
+   *                    whether or not it actually rang (so deferred
+   *                    groups still hand off in strict slot order).
+   *   wqes_posted    : "doorbell rung" cursor (db_rung) — the value last
+   *                    written to the SQ doorbell register. With request
+   *                    aggregation (ncclGinOptFlagsAggregateRequests) the
+   *                    doorbell is deferred: a group writes its WQEs and
+   *                    hands off without ringing; a later non-aggregated
+   *                    group rings to its own chunk_next, which
+   *                    is >= every deferred slot (the doorbell is
+   *                    monotonic), draining the whole batch in one ring.
+   *                    Un-rung WQEs are bounded by max_batch via the
+   *                    window check below (gated on db_rung), so the EFA
+   *                    staging limit is always respected.
    *
    * Coalescing: lanes of a warp targeting the same QP form a group via
    * coalesced_threads() + labeled_partition(qp). The leader reserves g
@@ -148,6 +191,10 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
 
   cuda::atomic_ref<uint32_t, ncclGinScope<mode>> pc_ref(qp->sq.wq.pc);
   cuda::atomic_ref<uint32_t, ncclGinScope<mode>> base_ref(qp->sq.wq.wqes_completed);
+  /* db_rung reuses the wqes_posted field, which the GIN path does not
+   * otherwise use (zero-initialized by the plugin). */
+  cuda::atomic_ref<uint32_t, ncclGinScope<mode>> dbrung_ref(qp->sq.wq.wqes_posted);
+  const bool aggregate = (optFlags & ncclGinOptFlagsAggregateRequests) != 0;
 
   /* Leader reserves the whole group's contiguous slot range. */
   uint32_t base = 0;
@@ -163,10 +210,31 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
     uint32_t chunk_next = chunk_base + (uint32_t)chunk_size;
 
     if (is_leader) {
-      /* Sliding-window backpressure: keep cumulative un-doorbelled
-       * WQEs (across all groups) within max_batch. */
-      while (chunk_next > base_ref.load(cuda::memory_order_acquire) + max_batch) {
-        /* spin */
+      /* Backpressure: keep the number of written-but-un-rung WQEs within
+       * max_batch (the hard EFA staging limit). The un-rung depth this chunk
+       * would reach is chunk_next - db_rung.
+       *
+       * We must ring to make room rather than just wait: a deferring group
+       * leaves its WQEs un-rung and hands off without ringing, so db_rung is
+       * only ever advanced by a group that actively rings. If this group
+       * blocked passively, no one would ring the deferred slots below it and
+       * it would wait forever.
+       *
+       * So while the depth would exceed max_batch, make room by ringing the
+       * deferred work that is already written. Only the turn-holder
+       * (base_ref == chunk_base) may ring, and it rings up to chunk_base:
+       * those slots were written and published by earlier groups that handed
+       * off before us, and the deferred span below chunk_base is itself
+       * <= max_batch, so one doorbell drains it. If we do not yet hold the
+       * turn, a lower group does and will either ring (advancing db_rung) or
+       * hand off (advancing base_ref); keep checking until our chunk fits. */
+      while (chunk_next - dbrung_ref.load(cuda::memory_order_acquire) > max_batch) {
+        if (base_ref.load(cuda::memory_order_acquire) == chunk_base) {
+          uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
+          if (chunk_base != db_rung) {   /* deferred, already-written batch */
+            ringDoorbell<mode>(qp, submitted_count_ptr, dbrung_ref, db_rung, chunk_base);
+          }
+        }
       }
       /* SQ ring-overflow backpressure on the chunk's high-water slot.
        * System-scope acquire so we see the latest NIC FI_WRITE update
@@ -198,14 +266,30 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
     group.sync();   /* all members' WQE writes for this chunk are done */
 
     if (is_leader) {
-      __threadfence_system();   /* publish all chunk WQE writes before the doorbell */
-      /* Doorbell-order rendezvous: ring in slot order across groups. */
+      /* Publish this group's WQE writes to system scope before handing off,
+       * so they are visible to the NIC whenever any doorbell (this group's or
+       * a later draining group's) rings a slot in this range.
+       * Each group must publish its own writes: __threadfence_system()
+       * orders only the calling thread's writes, and the handoff (base_ref)
+       * is device/block scope, so a later thread's fence cannot publish this
+       * group's writes for it. Runs on both the ring and the defer path. */
+      __threadfence_system();
+      /* Doorbell-order rendezvous: take the turn in strict slot order. */
       while (base_ref.load(cuda::memory_order_acquire) != chunk_base) {
         /* spin */
       }
-      *qp->sq.wq.db = chunk_next;
-      __threadfence_system();   /* drain/order the doorbell write */
-      scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)chunk_size);
+
+      /* Ring unless aggregating. Force a ring if deferring would leave
+       * more than max_batch un-rung WQEs (db_rung is the last rung slot),
+       * so the EFA staging limit is never exceeded. When we do ring, ring
+       * to chunk_next: it is >= every deferred slot below us (we hold the
+       * turn in slot order), so one doorbell drains the whole contiguous
+       * batch. submitted_count advances by everything since db_rung. */
+      uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
+      bool must_ring = (!aggregate) || (chunk_next - db_rung >= max_batch);
+      if (must_ring) {
+        ringDoorbell<mode>(qp, submitted_count_ptr, dbrung_ref, db_rung, chunk_next);
+      }
       base_ref.store(chunk_next, cuda::memory_order_release);   /* hand off to next group */
     }
     group.sync();   /* chunk fully posted before the next chunk */
@@ -360,7 +444,7 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * fires once. absSrcAddr/absDstAddr/writeBytes already point at the
        * payload or the scratch region per the hasPayload branch above. */
       postRdmaWrite<mode>(main_ep, main_ah, main_qpn, main_qkey, absSrcAddr, srcLkey,
-                          writeBytes, absDstAddr, dstRkey);
+                          writeBytes, absDstAddr, dstRkey, optFlags);
 
       /* Remaining (signalCount - 1) signal increments: 0-byte writes to
        * the peer scratch region on the DATA endpoint, so the caller's
@@ -370,7 +454,7 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
       for (uint32_t k = 1u; k < signalCount; k++) {
         postRdmaWrite<mode>(&dev->data, dataSigAh, dataSigQpn, dataSigQkey,
                             dev->scratch_local_addr, dev->scratch_lkey, 0u,
-                            /*dstAddr=*/0, /*dstRkey=*/0);
+                            /*dstAddr=*/0, /*dstRkey=*/0, optFlags);
       }
     }
   }
