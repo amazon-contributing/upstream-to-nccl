@@ -8,8 +8,11 @@
 #include <cstring>
 #include <errno.h>
 #include <stdint.h>
+#include <cstddef>
 
-#include "efa_cuda_dp.cuh"
+#include "../common/efa_cuda_dp_types.h"
+#include "efa_cuda_dp_defs.cuh"
+#include "efa_io_defs.h"
 
 #define EFA_BIT(nr)	(1UL << (nr))
 
