@@ -1,7 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
-/*
- * Copyright 2018-2024 Amazon.com, Inc. or its affiliates. All rights reserved.
- */
+// SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause OR Apache-2.0
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 #ifndef _EFA_IO_H_
 #define _EFA_IO_H_
