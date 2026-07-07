@@ -138,6 +138,12 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
   efa_cuda_wr_set_sge(&wr, srcLkey, srcAddr, writeBytes);
   efa_cuda_wr_set_remote(&wr, ah, (uint32_t)qpn, qkey);
 
+  /* Tag the WQE as PPS-sensitive. GIN puts are small, high-rate writes, so
+   * ask the NIC to optimize for packets-per-second (burst PPS) rather than
+   * bandwidth. This sets the PROCESSING_HINTS field in the WQE meta
+   * descriptor (ctrl3); it is a hint, so the device may ignore it. */
+  efa_cuda_wr_set_processing_hints(&wr, EFA_CUDA_PROCESSING_HINT_BURST_PPS_SENSITIVE);
+
   /* Sliding-window SQ post with warp coalescing (Stage 2).
    *
    * Inlines the reserve / write / doorbell sequence directly against
