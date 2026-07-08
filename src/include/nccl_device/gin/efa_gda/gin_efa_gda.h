@@ -604,9 +604,12 @@ NCCL_DEVICE_INLINE static void putValueImpl(ncclGinCtx ctx, Coop coop, int peer,
 
 /* ── flushImplMode: mode-templated Flush implementation ───────────── */
 
-template <ncclGinResourceSharingMode mode, typename Coop>
-NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::memory_order ord, uint32_t* abortFlag) {
+template <bool HasTimeout, ncclGinResourceSharingMode mode, typename Coop>
+NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::memory_order ord, uint32_t* abortFlag,
+                                             uint64_t timeoutCycles) {
   (void)ord;
+  (void)timeoutCycles;
+  // TODO: Implement timeout
   coop.sync();
   if (coop.thread_rank() == 0) {
     nccl_ofi_gin_gdaki_dev_handle* dev = getDevHandle(ctx);
@@ -652,14 +655,15 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
 
 /* ── flushImpl: runtime mode dispatcher ───────────────────────────── */
 
-template <typename Coop>
-NCCL_DEVICE_INLINE static void flushImpl(ncclGinCtx ctx, Coop coop, cuda::memory_order ord, uint32_t* abortFlag) {
+template <bool HasTimeout, typename Coop>
+NCCL_DEVICE_INLINE static void flushImpl(ncclGinCtx ctx, Coop coop, cuda::memory_order ord, uint32_t* abortFlag,
+                                         uint64_t timeoutCycles) {
   switch ((ncclGinResourceSharingMode)ctx.resourceSharingMode) {
   case NCCL_GIN_RESOURCE_SHARING_CTA:
-    flushImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, ord, abortFlag);
+    flushImplMode<HasTimeout, NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, ord, abortFlag, timeoutCycles);
     break;
   default:
-    flushImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, ord, abortFlag);
+    flushImplMode<HasTimeout, NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, ord, abortFlag, timeoutCycles);
     break;
   }
 }
@@ -752,6 +756,19 @@ struct ncclGinApi_Wait<NCCL_NET_DEVICE_GIN_EFA_GDA> {
     (void)ord;
     (void)abortFlag;
   }
+
+  NCCL_DEVICE_INLINE static ncclResult_t call(ncclGinCtx ctx, ncclGinRequest_t& request, bool hasDescriptor,
+                                              ncclGinDescriptorSmem* descriptor, cuda::memory_order ord,
+                                              uint32_t* abortFlag, uint64_t timeoutCycles) {
+    (void)ctx;
+    (void)request;
+    (void)hasDescriptor;
+    (void)descriptor;
+    (void)ord;
+    (void)abortFlag;
+    (void)timeoutCycles;
+    return ncclSuccess;
+  }
 };
 
 /* ── Flush ────────────────────────────────────────────────────────── */
@@ -763,7 +780,24 @@ struct ncclGinApi_Flush<NCCL_NET_DEVICE_GIN_EFA_GDA> {
                                       cuda::memory_order ord, uint32_t* abortFlag) {
     (void)hasDescriptor;
     (void)descriptor;
-    nccl::gin::efa_gda::flushImpl(ctx, coop, ord, abortFlag);
+    nccl::gin::efa_gda::flushImpl<false>(ctx, coop, ord, abortFlag, 0);
+  }
+
+  template <typename Coop>
+  NCCL_DEVICE_INLINE static ncclResult_t call(ncclGinCtx ctx, Coop coop, bool hasDescriptor,
+                                              ncclGinDescriptorSmem* descriptor, cuda::memory_order ord,
+                                              uint32_t* abortFlag, uint64_t timeoutCycles) {
+    (void)hasDescriptor;
+    (void)descriptor;
+    nccl::gin::efa_gda::flushImpl<true>(ctx, coop, ord, abortFlag, timeoutCycles);
+  };
+};
+
+/* ── SupportsStrongSignal ────────────────────────────────────────────────────────── */
+template <>
+struct ncclGinApi_SupportsStrongSignal<NCCL_NET_DEVICE_GIN_EFA_GDA> {
+  NCCL_DEVICE_INLINE static bool call(ncclGinCtx) {
+    return false;
   }
 };
 
