@@ -38,7 +38,11 @@
 #endif
 
 #ifndef NCCL_GIN_EFA_GDA_ENABLE
+#if CUDA_VERSION >= 12020 && __CUDA_ARCH__ >= 700
 #define NCCL_GIN_EFA_GDA_ENABLE 1
+#else
+#define NCCL_GIN_EFA_GDA_ENABLE 0
+#endif
 #endif
 
 enum ncclGinOptFlags {
