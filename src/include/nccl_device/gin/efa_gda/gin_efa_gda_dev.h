@@ -21,8 +21,8 @@
  * and the counter-based completion tracking fields.
  */
 struct nccl_ofi_gin_gdaki_dev_endpoint_handle {
-  void *qp;                        /* GPU-resident QP (efa_cuda_qp layout) */
-  void *cq;                        /* GPU-resident CQ (efa_cuda_cq layout) */
+  void* qp;                        /* GPU-resident QP (efa_cuda_qp layout) */
+  void* cq;                        /* GPU-resident CQ (efa_cuda_cq layout) */
 
   /* Target addressing for this (poster) endpoint's QP.
    *
@@ -46,9 +46,9 @@ struct nccl_ofi_gin_gdaki_dev_endpoint_handle {
    *
    * Layout is shared with the plugin definition in aws-ofi-nccl
    * (nccl_ofi_gin_gdaki_dev.h) — keep them in sync. */
-  uint16_t *target_address_handles; /* [total_slots * nranks] */
-  uint16_t *target_remote_qpns;     /* [total_slots * nranks] */
-  uint32_t *target_qkey;            /* [total_slots * nranks] */
+  uint16_t* target_address_handles; /* [total_slots * nranks] */
+  uint16_t* target_remote_qpns;     /* [total_slots * nranks] */
+  uint32_t* target_qkey;            /* [total_slots * nranks] */
 
   /* Per-QP spinlock for the device-side WQE post path. efa-dp-direct's
    * start_sq_batch / sq_batch_place_wr / flush_sq_wrs sequence is
@@ -71,7 +71,7 @@ struct nccl_ofi_gin_gdaki_dev_endpoint_handle {
   /* `local_cntr_value` is read via cuda::atomic_ref with system scope
    * (see hwCounterLoad helper) since the NIC writes it via PCIe and
    * we need to bypass GPU caches when polling. */
-  uint64_t *local_cntr_value;
+  uint64_t* local_cntr_value;
   uint64_t submitted_count;
 
   /* SQ ring size for this endpoint's QP. Used by Put to gate new
@@ -102,7 +102,7 @@ struct nccl_ofi_gin_gdaki_dev_counter_handle {
   struct nccl_ofi_gin_gdaki_dev_endpoint_handle base;
   /* NIC writes the hardware counter value here (GPU memory). Read
    * via system-scope atomic load (hwCounterLoad / waitSignal). */
-  uint64_t *cntr_value;
+  uint64_t* cntr_value;
 
   /* Reset baseline for offset-based (reset-without-zeroing) semantics.
    * The NIC counter cannot be written by software, so ResetSignal /
@@ -133,8 +133,8 @@ struct nccl_ofi_gin_gdaki_dev_handle {
    * endpoint with cntr_value pointing at the FI_WRITE counter
    * (counter_handles) or the FI_REMOTE_WRITE counter (signal_handles).
    * The array pointer is NULL when the corresponding count is zero. */
-  struct nccl_ofi_gin_gdaki_dev_counter_handle **counter_handles; /* [nCounters] or NULL */
-  struct nccl_ofi_gin_gdaki_dev_counter_handle **signal_handles;  /* [nSignals]  or NULL */
+  struct nccl_ofi_gin_gdaki_dev_counter_handle** counter_handles; /* [nCounters] or NULL */
+  struct nccl_ofi_gin_gdaki_dev_counter_handle** signal_handles;  /* [nSignals]  or NULL */
   int32_t nCounters;
   int32_t nSignals;
 
@@ -169,8 +169,8 @@ struct nccl_ofi_gin_gdaki_dev_handle {
   uint32_t scratch_lkey;
   uint32_t scratch_pad;
   uint64_t scratch_local_addr;
-  uint64_t *scratch_remote_addrs;
-  uint32_t *scratch_remote_rkeys;
+  uint64_t* scratch_remote_addrs;
+  uint32_t* scratch_remote_rkeys;
 
   /* lkey and slot stride for the pvdata PutValue source-slot pool (single
    * MR over the whole pool, uniform slot size). */
