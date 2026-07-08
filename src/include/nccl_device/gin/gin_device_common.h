@@ -216,12 +216,12 @@ NCCL_DEVICE_INLINE static decltype(auto) ncclGinCallImpl(unsigned beMask, ncclGi
     return ApiFn<NCCL_NET_DEVICE_GIN_GPI>::call(ctx, static_cast<Arg&&>(arg)...);
 #endif
 #if NCCL_GIN_EFA_GDA_ENABLE
-    case (int)NCCL_NET_DEVICE_GIN_EFA_GDA:
-      if (!(1 & (beMask >> (int)NCCL_NET_DEVICE_GIN_EFA_GDA))) __builtin_unreachable();
-      return ApiFn<NCCL_NET_DEVICE_GIN_EFA_GDA>::call(ctx, static_cast<Arg&&>(arg)...);
+  case (int)NCCL_NET_DEVICE_GIN_EFA_GDA:
+    if (!(1 & (beMask >> (int)NCCL_NET_DEVICE_GIN_EFA_GDA))) __builtin_unreachable();
+    return ApiFn<NCCL_NET_DEVICE_GIN_EFA_GDA>::call(ctx, static_cast<Arg&&>(arg)...);
 #endif
-    default:
-      __builtin_unreachable();
+  default:
+    __builtin_unreachable();
   }
 }
 

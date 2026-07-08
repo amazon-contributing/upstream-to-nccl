@@ -34,8 +34,7 @@ namespace efa_gda {
 /* The plugin returns a contiguous array of per-context dev handles
  * in GPU memory; ctx.handle points at element 0. ctx.contextId
  * selects the entry for this caller. */
-NCCL_DEVICE_INLINE static nccl_ofi_gin_gdaki_dev_handle*
-getDevHandle(ncclGinCtx ctx) {
+NCCL_DEVICE_INLINE static nccl_ofi_gin_gdaki_dev_handle* getDevHandle(ncclGinCtx ctx) {
   return &((nccl_ofi_gin_gdaki_dev_handle*)ctx.handle)[ctx.contextId];
 }
 
@@ -43,8 +42,7 @@ getDevHandle(ncclGinCtx ctx) {
 
 template <ncclGinResourceSharingMode mode>
 static constexpr cuda::thread_scope ncclGinScope =
-    (mode == NCCL_GIN_RESOURCE_SHARING_CTA)
-        ? cuda::thread_scope_block : cuda::thread_scope_device;
+  (mode == NCCL_GIN_RESOURCE_SHARING_CTA) ? cuda::thread_scope_block : cuda::thread_scope_device;
 
 /* The EFA hardware completion counters (FI_WRITE / FI_REMOTE_WRITE) wrap at
  * 2^31, while the kernel-side producer cursors are uint32 (wrap at 2^32).
@@ -59,13 +57,13 @@ static constexpr uint32_t EFA_CNTR_MASK = 0x7fffffffu;
 /* ── Atomic primitives parameterized on scope and memory order ────── */
 
 template <cuda::thread_scope Scope, cuda::memory_order Order>
-NCCL_DEVICE_INLINE static uint64_t scopedAtomicLoad(uint64_t *ptr) {
+NCCL_DEVICE_INLINE static uint64_t scopedAtomicLoad(uint64_t* ptr) {
   cuda::atomic_ref<uint64_t, Scope> r(*ptr);
   return r.load(Order);
 }
 
 template <cuda::thread_scope Scope, cuda::memory_order Order>
-NCCL_DEVICE_INLINE static void scopedAtomicAdd(uint64_t *ptr, uint64_t val) {
+NCCL_DEVICE_INLINE static void scopedAtomicAdd(uint64_t* ptr, uint64_t val) {
   cuda::atomic_ref<uint64_t, Scope> r(*ptr);
   r.fetch_add(val, Order);
 }
@@ -80,7 +78,7 @@ NCCL_DEVICE_INLINE static void scopedAtomicAdd(uint64_t *ptr, uint64_t val) {
  * reached a target, the NIC's prior side effects (e.g. source-buffer
  * DMA-reads complete) are ordered-before whatever this thread does
  * next (e.g. overwriting that source buffer or reusing the slot). */
-NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t *ptr) {
+NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t* ptr) {
   return scopedAtomicLoad<cuda::thread_scope_system, cuda::memory_order_acquire>(ptr);
 }
 
@@ -104,14 +102,12 @@ NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t *ptr) {
  * orders only the calling thread's own writes, and the WQEs being rung were
  * written by other threads. */
 template <ncclGinResourceSharingMode mode>
-NCCL_DEVICE_INLINE static void ringDoorbell(
-    efa_cuda_qp *qp, uint64_t *submitted_count_ptr,
-    cuda::atomic_ref<uint32_t, ncclGinScope<mode>> &dbrung_ref,
-    uint32_t db_rung, uint32_t target) {
+NCCL_DEVICE_INLINE static void ringDoorbell(efa_cuda_qp* qp, uint64_t* submitted_count_ptr,
+                                            cuda::atomic_ref<uint32_t, ncclGinScope<mode>>& dbrung_ref,
+                                            uint32_t db_rung, uint32_t target) {
   *qp->sq.wq.db = target;
   __threadfence_system();   /* order the doorbell MMIO write */
-  scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(
-      submitted_count_ptr, (uint64_t)(target - db_rung));
+  scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)(target - db_rung));
   dbrung_ref.store(target, cuda::memory_order_release);
 }
 
@@ -130,17 +126,16 @@ NCCL_DEVICE_INLINE static void ringDoorbell(
  * pvSlotSize and points the WR's SGE there. Put (pvSrcVal == nullptr) uses
  * the caller's fixed srcAddr/srcLkey. */
 template <ncclGinResourceSharingMode mode>
-NCCL_DEVICE_INLINE static void postRdmaWrite(
-    nccl_ofi_gin_gdaki_dev_endpoint_handle *ep, uint16_t ah, uint16_t qpn,
-    uint32_t qkey, uint64_t srcAddr, uint32_t srcLkey, uint32_t writeBytes,
-    uint64_t dstAddr, uint32_t dstRkey, uint32_t optFlags = ncclGinOptFlagsDefault,
-    const void *pvSrcVal = nullptr, uint32_t pvValBytes = 0,
-    uint32_t pvLkey = 0, uint64_t pvSliceBase = 0, uint32_t pvSlotSize = 0) {
-
-  efa_cuda_qp       *qp                  = (efa_cuda_qp *)ep->qp;
-  uint64_t          *submitted_count_ptr  = &ep->submitted_count;
-  uint64_t          *local_cntr_ptr       = ep->local_cntr_value;
-  uint32_t           sq_size_val          = ep->sq_size;
+NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_handle* ep, uint16_t ah, uint16_t qpn,
+                                             uint32_t qkey, uint64_t srcAddr, uint32_t srcLkey, uint32_t writeBytes,
+                                             uint64_t dstAddr, uint32_t dstRkey,
+                                             uint32_t optFlags = ncclGinOptFlagsDefault, const void* pvSrcVal = nullptr,
+                                             uint32_t pvValBytes = 0, uint32_t pvLkey = 0, uint64_t pvSliceBase = 0,
+                                             uint32_t pvSlotSize = 0) {
+  efa_cuda_qp* qp = (efa_cuda_qp*)ep->qp;
+  uint64_t* submitted_count_ptr = &ep->submitted_count;
+  uint64_t* local_cntr_ptr = ep->local_cntr_value;
+  uint32_t sq_size_val = ep->sq_size;
 
   /* Only the SGE differs for PutValue, so set_sge is deferred. */
   efa_io_tx_wqe wr;
@@ -196,9 +191,9 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
   cooperative_groups::coalesced_group active = cooperative_groups::coalesced_threads();
   auto group = cooperative_groups::labeled_partition(active, (unsigned long long)(uintptr_t)qp);
 
-  int  my_idx     = group.thread_rank();
-  int  group_size = group.num_threads();
-  bool is_leader  = (my_idx == 0);
+  int my_idx = group.thread_rank();
+  int group_size = group.num_threads();
+  bool is_leader = (my_idx == 0);
   uint32_t max_batch = qp->sq.wq.max_batch;
 
   cuda::atomic_ref<uint32_t, ncclGinScope<mode>> pc_ref(qp->sq.wq.pc);
@@ -217,7 +212,7 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
 
   /* Chunk the group into windows of <= max_batch. */
   for (int chunk_start = 0; chunk_start < group_size; chunk_start += (int)max_batch) {
-    int      chunk_size = min((int)max_batch, group_size - chunk_start);
+    int chunk_size = min((int)max_batch, group_size - chunk_start);
     uint32_t chunk_base = base + (uint32_t)chunk_start;
     uint32_t chunk_next = chunk_base + (uint32_t)chunk_size;
 
@@ -273,24 +268,22 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
       if (pvSrcVal != nullptr) {
         /* PutValue: stage the value into this lane's pool slot, then point
          * the SGE at it. */
-        uint64_t slot_idx   = (uint64_t)my_slot % (uint64_t)sq_size_val;
+        uint64_t slot_idx = (uint64_t)my_slot % (uint64_t)sq_size_val;
         uint64_t local_addr = pvSliceBase + slot_idx * (uint64_t)pvSlotSize;
-        for (uint32_t b = 0; b < pvValBytes; b++)
-          ((uint8_t *)local_addr)[b] = ((const uint8_t *)pvSrcVal)[b];
-        wrSrcAddr  = local_addr;
-        wrSrcLkey  = pvLkey;
+        for (uint32_t b = 0; b < pvValBytes; b++) ((uint8_t*)local_addr)[b] = ((const uint8_t*)pvSrcVal)[b];
+        wrSrcAddr = local_addr;
+        wrSrcLkey = pvLkey;
       }
 
       /* Only the source SGE is per-lane, the rest of wr was already built above. */
       efa_cuda_wr_set_sge(&wr, wrSrcLkey, wrSrcAddr, writeBytes);
 
-      uint32_t sq_idx    = my_slot & qp->sq.wq.queue_mask;
-      int      wqe_phase = (int)((my_slot >> qp->sq.wq.queue_size_shift) & 1u);
+      uint32_t sq_idx = my_slot & qp->sq.wq.queue_mask;
+      int wqe_phase = (int)((my_slot >> qp->sq.wq.queue_size_shift) & 1u);
       EFA_SET(&wr.meta.ctrl2, EFA_IO_TX_META_DESC_PHASE, wqe_phase);
-      uint64_t *src = (uint64_t *)&wr;
-      uint64_t *dst = (uint64_t *)(qp->sq.wq.buf + sq_idx * sizeof(efa_io_tx_wqe));
-      for (int i = 0; i < 8; i++)
-        dst[i] = src[i];
+      uint64_t* src = (uint64_t*)&wr;
+      uint64_t* dst = (uint64_t*)(qp->sq.wq.buf + sq_idx * sizeof(efa_io_tx_wqe));
+      for (int i = 0; i < 8; i++) dst[i] = src[i];
     }
     group.sync();   /* all members' WQE writes for this chunk are done */
 
@@ -328,34 +321,28 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(
 /* ── putImplMode: mode-templated Put implementation ─────────────── */
 
 template <ncclGinResourceSharingMode mode, typename Coop>
-NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, bool hasWins,
-                                    ncclGinWindow_t dstWin, size_t dstOff, ncclGinWindow_t srcWin,
-                                    size_t srcOff, size_t bytes,
-                                    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
-                                    uint64_t signalOpArg, bool hasCounter,
-                                    ncclGinCounter_t counterId, bool hasDescriptor,
-                                    ncclGinDescriptorSmem* descriptor,
-                                    cuda::thread_scope required, cuda::thread_scope given,
-                                    uint32_t optFlags) {
+NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, bool hasWins, ncclGinWindow_t dstWin,
+                                           size_t dstOff, ncclGinWindow_t srcWin, size_t srcOff, size_t bytes,
+                                           ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
+                                           uint64_t signalOpArg, bool hasCounter, ncclGinCounter_t counterId,
+                                           bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
+                                           cuda::thread_scope required, cuda::thread_scope given, uint32_t optFlags) {
   coop.sync();
   if (coop.thread_rank() == 0) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = getDevHandle(ctx);
+    nccl_ofi_gin_gdaki_dev_handle* dev = getDevHandle(ctx);
 
-    bool hasPayload    = hasWins && bytes > 0;
+    bool hasPayload = hasWins && bytes > 0;
     bool needsSignalEp = (signal.type != NCCL_GIN_SIGNAL_TYPE_NONE) || hasCounter;
 
     /* This backend supports INDEXED signals only. EFA's FI_REMOTE_WRITE
      * counter ticks exactly once per inbound write and has no atomic-add,
      * so a signal Add-by-N is emulated as N inbound write events (see the
      * posting block below). VA-typed signals are not representable. */
-    assert((signal.type == NCCL_GIN_SIGNAL_TYPE_NONE
-            || signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED)
-           && "EFA GDA: only INDEXED signals are supported");
-    assert((signal.type != NCCL_GIN_SIGNAL_TYPE_INDEXED
-            || (int)signal.indexedSignal.signalId < dev->nSignals)
-           && "EFA GDA: signalId out of range");
-    assert((!hasCounter || (int)counterId < dev->nCounters)
-           && "EFA GDA: counterId out of range");
+    assert((signal.type == NCCL_GIN_SIGNAL_TYPE_NONE || signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED) &&
+           "EFA GDA: only INDEXED signals are supported");
+    assert((signal.type != NCCL_GIN_SIGNAL_TYPE_INDEXED || (int)signal.indexedSignal.signalId < dev->nSignals) &&
+           "EFA GDA: signalId out of range");
+    assert((!hasCounter || (int)counterId < dev->nCounters) && "EFA GDA: counterId out of range");
 
     if (hasPayload || needsSignalEp) {
       /* Two WQE patterns:
@@ -379,20 +366,18 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
          * dev->rail_id (= contextId % num_rails, pre-baked by the
          * plugin) selects this context's rail, keeping the path
          * rail-agnostic. */
-        nccl_ofi_gin_gdaki_mr_handle *dstMh =
-          ((nccl_ofi_gin_gdaki_mr_handle **)dstWin)[dev->rail_id];
-        nccl_ofi_gin_gdaki_mr_handle *srcMh =
-          ((nccl_ofi_gin_gdaki_mr_handle **)srcWin)[dev->rail_id];
+        nccl_ofi_gin_gdaki_mr_handle* dstMh = ((nccl_ofi_gin_gdaki_mr_handle**)dstWin)[dev->rail_id];
+        nccl_ofi_gin_gdaki_mr_handle* srcMh = ((nccl_ofi_gin_gdaki_mr_handle**)srcWin)[dev->rail_id];
         absSrcAddr = srcMh->local_addr + srcOff;
         absDstAddr = dstMh->peers[peer].remote_addr + dstOff;
-        dstRkey    = dstMh->peers[peer].rkey;
-        srcLkey    = srcMh->lkey;
+        dstRkey = dstMh->peers[peer].rkey;
+        srcLkey = srcMh->lkey;
         writeBytes = (uint32_t)bytes;
       } else {
         absSrcAddr = dev->scratch_local_addr;
         absDstAddr = dev->scratch_remote_addrs[peer];
-        dstRkey    = dev->scratch_remote_rkeys[peer];
-        srcLkey    = dev->scratch_lkey;
+        dstRkey = dev->scratch_remote_rkeys[peer];
+        srcLkey = dev->scratch_lkey;
         writeBytes = 0;
       }
 
@@ -413,8 +398,8 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        *
        * The signal (signalId) selects the remote (target) QP via the
        * slot; the counter (counterId) selects the local (poster) QP. */
-      nccl_ofi_gin_gdaki_dev_endpoint_handle *main_ep =
-          hasCounter ? &dev->counter_handles[counterId]->base : &dev->data;
+      nccl_ofi_gin_gdaki_dev_endpoint_handle* main_ep =
+        hasCounter ? &dev->counter_handles[counterId]->base : &dev->data;
 
       /* Target slot in the [total_slots*nranks] target addressing table
        * (targetSlot-major: idx = targetSlot*nranks + peer):
@@ -426,8 +411,7 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * The local poster QP is chosen by counterId (main_ep); the slot
        * picks the remote target. */
       const bool isIndexed = (signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED);
-      const uint32_t targetSlot =
-          isIndexed ? (1u + (uint32_t)signal.indexedSignal.signalId) : 0u;
+      const uint32_t targetSlot = isIndexed ? (1u + (uint32_t)signal.indexedSignal.signalId) : 0u;
       const uint32_t targetIdx = targetSlot * (uint32_t)dev->nranks + (uint32_t)peer;
 
       /* Signal increment count.
@@ -465,11 +449,11 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * Both resolve the SAME remote target (slot), but each through its
        * own endpoint's AV — an address handle is AV-local, so the data EP
        * uses its own tuple, not main_ep's. */
-      const uint16_t main_ah   = main_ep->target_address_handles[targetIdx];
-      const uint16_t main_qpn  = main_ep->target_remote_qpns[targetIdx];
+      const uint16_t main_ah = main_ep->target_address_handles[targetIdx];
+      const uint16_t main_qpn = main_ep->target_remote_qpns[targetIdx];
       const uint32_t main_qkey = main_ep->target_qkey[targetIdx];
-      const uint16_t dataSigAh   = dev->data.target_address_handles[targetIdx];
-      const uint16_t dataSigQpn  = dev->data.target_remote_qpns[targetIdx];
+      const uint16_t dataSigAh = dev->data.target_address_handles[targetIdx];
+      const uint16_t dataSigQpn = dev->data.target_remote_qpns[targetIdx];
       const uint32_t dataSigQkey = dev->data.target_qkey[targetIdx];
 
       /* First write: payload (hasPayload) or 0-byte scratch (signal-only),
@@ -477,8 +461,8 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * addressed to the resolved target so the receiver's FI_REMOTE_WRITE
        * fires once. absSrcAddr/absDstAddr/writeBytes already point at the
        * payload or the scratch region per the hasPayload branch above. */
-      postRdmaWrite<mode>(main_ep, main_ah, main_qpn, main_qkey, absSrcAddr, srcLkey,
-                          writeBytes, absDstAddr, dstRkey, optFlags);
+      postRdmaWrite<mode>(main_ep, main_ah, main_qpn, main_qkey, absSrcAddr, srcLkey, writeBytes, absDstAddr, dstRkey,
+                          optFlags);
 
       /* Remaining (signalCount - 1) signal increments: 0-byte writes to
        * the peer scratch region on the DATA endpoint, so the caller's
@@ -486,71 +470,64 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
        * signalCount > 1, which implies an INDEXED Add (and thus a
        * signal endpoint target). */
       for (uint32_t k = 1u; k < signalCount; k++) {
-        postRdmaWrite<mode>(&dev->data, dataSigAh, dataSigQpn, dataSigQkey,
-                            dev->scratch_local_addr, dev->scratch_lkey, 0u,
-                            dev->scratch_remote_addrs[peer],
-                            dev->scratch_remote_rkeys[peer], optFlags);
+        postRdmaWrite<mode>(&dev->data, dataSigAh, dataSigQpn, dataSigQkey, dev->scratch_local_addr, dev->scratch_lkey,
+                            0u, dev->scratch_remote_addrs[peer], dev->scratch_remote_rkeys[peer], optFlags);
       }
     }
   }
-  (void)hasDescriptor; (void)descriptor;
-  (void)required; (void)given; (void)optFlags;
+  (void)hasDescriptor;
+  (void)descriptor;
+  (void)required;
+  (void)given;
+  (void)optFlags;
   coop.sync();
 }
 
 /* ── putImpl: runtime mode dispatcher ─────────────────────────────── */
 
 template <typename Coop>
-NCCL_DEVICE_INLINE static void putImpl(ncclGinCtx ctx, Coop coop, int peer, bool hasWins,
-                                    ncclGinWindow_t dstWin, size_t dstOff, ncclGinWindow_t srcWin,
-                                    size_t srcOff, size_t bytes,
-                                    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
-                                    uint64_t signalOpArg, bool hasCounter,
-                                    ncclGinCounter_t counterId, bool hasDescriptor,
-                                    ncclGinDescriptorSmem* descriptor,
-                                    cuda::thread_scope required, cuda::thread_scope given,
-                                    uint32_t optFlags) {
+NCCL_DEVICE_INLINE static void putImpl(ncclGinCtx ctx, Coop coop, int peer, bool hasWins, ncclGinWindow_t dstWin,
+                                       size_t dstOff, ncclGinWindow_t srcWin, size_t srcOff, size_t bytes,
+                                       ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp, uint64_t signalOpArg,
+                                       bool hasCounter, ncclGinCounter_t counterId, bool hasDescriptor,
+                                       ncclGinDescriptorSmem* descriptor, cuda::thread_scope required,
+                                       cuda::thread_scope given, uint32_t optFlags) {
   switch ((ncclGinResourceSharingMode)ctx.resourceSharingMode) {
-    case NCCL_GIN_RESOURCE_SHARING_CTA:
-      putImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(
-        ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes,
-        signal, signalOp, signalOpArg, hasCounter, counterId,
-        hasDescriptor, descriptor, required, given, optFlags);
-      break;
-    default:
-      putImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(
-        ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes,
-        signal, signalOp, signalOpArg, hasCounter, counterId,
-        hasDescriptor, descriptor, required, given, optFlags);
-      break;
+  case NCCL_GIN_RESOURCE_SHARING_CTA:
+    putImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes, signal,
+                                               signalOp, signalOpArg, hasCounter, counterId, hasDescriptor, descriptor,
+                                               required, given, optFlags);
+    break;
+  default:
+    putImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes, signal,
+                                               signalOp, signalOpArg, hasCounter, counterId, hasDescriptor, descriptor,
+                                               required, given, optFlags);
+    break;
   }
 }
 
 /* ── putValueImplMode: mode-templated PutValue implementation ─────── */
 
 template <ncclGinResourceSharingMode mode, typename Coop, typename T>
-NCCL_DEVICE_INLINE static void putValueImplMode(
-    ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin, size_t dstOff, T srcVal,
-    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp, uint64_t signalOpArg,
-    bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
-    cuda::thread_scope required, cuda::thread_scope given, uint32_t optFlags) {
-
+NCCL_DEVICE_INLINE static void putValueImplMode(ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin,
+                                                size_t dstOff, T srcVal, ncclGinSignalDescriptor signal,
+                                                ncclGinSignalOp_t signalOp, uint64_t signalOpArg, bool hasDescriptor,
+                                                ncclGinDescriptorSmem* descriptor, cuda::thread_scope required,
+                                                cuda::thread_scope given, uint32_t optFlags) {
   static_assert(sizeof(T) <= 8, "PutValue: T must fit in 8 bytes");
   coop.sync();
   if (coop.thread_rank() == 0) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = getDevHandle(ctx);
+    nccl_ofi_gin_gdaki_dev_handle* dev = getDevHandle(ctx);
 
     /* This backend supports INDEXED signals only. */
-    assert((signal.type == NCCL_GIN_SIGNAL_TYPE_NONE
-            || signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED)
-           && "EFA GDA: only INDEXED signals are supported");
+    assert((signal.type == NCCL_GIN_SIGNAL_TYPE_NONE || signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED) &&
+           "EFA GDA: only INDEXED signals are supported");
 
     /* Resolve the window to this context's rail. */
-    nccl_ofi_gin_gdaki_mr_handle *dstMh =
-      ((nccl_ofi_gin_gdaki_mr_handle **)dstWin)[dev->rail_id];
+    nccl_ofi_gin_gdaki_mr_handle* dstMh = ((nccl_ofi_gin_gdaki_mr_handle**)dstWin)[dev->rail_id];
 
     /* All PutValues post from the dedicated PutValue endpoint (pvdata). */
-    nccl_ofi_gin_gdaki_dev_endpoint_handle *ep = &dev->pvdata;
+    nccl_ofi_gin_gdaki_dev_endpoint_handle* ep = &dev->pvdata;
 
     /* Resolve the remote target (ah, qpn, qkey) via pvdata's target table
      * (targetSlot-major: idx = targetSlot*nranks + peer), same target slots
@@ -561,11 +538,10 @@ NCCL_DEVICE_INLINE static void putValueImplMode(
      *       FI_REMOTE_WRITE bound, so no signal fires on the receiver)
      * The remote tuple is read through pvdata's own AV. */
     const bool isIndexed = (signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED);
-    const uint32_t targetSlot =
-        isIndexed ? (1u + (uint32_t)signal.indexedSignal.signalId) : 0u;
+    const uint32_t targetSlot = isIndexed ? (1u + (uint32_t)signal.indexedSignal.signalId) : 0u;
     const uint32_t targetIdx = targetSlot * (uint32_t)dev->nranks + (uint32_t)peer;
-    uint16_t ah   = ep->target_address_handles[targetIdx];
-    uint16_t qpn  = ep->target_remote_qpns[targetIdx];
+    uint16_t ah = ep->target_address_handles[targetIdx];
+    uint16_t qpn = ep->target_remote_qpns[targetIdx];
     uint32_t qkey = ep->target_qkey[targetIdx];
 
     /* Signal increment count, mirroring Put: Inc (or no signal) is a single
@@ -577,7 +553,7 @@ NCCL_DEVICE_INLINE static void putValueImplMode(
     }
 
     uint64_t absDstAddr = dstMh->peers[peer].remote_addr + dstOff;
-    uint32_t dstRkey    = dstMh->peers[peer].rkey;
+    uint32_t dstRkey = dstMh->peers[peer].rkey;
 
     /* Value write: stage srcVal into pvdata's pool and RDMA-write it to the
      * destination. The arrival ticks the target sc EP's FI_REMOTE_WRITE once
@@ -595,40 +571,34 @@ NCCL_DEVICE_INLINE static void putValueImplMode(
      * unless signalCount > 1, which implies an INDEXED Add (and thus a
      * signal endpoint target). */
     for (uint32_t k = 1u; k < signalCount; k++) {
-      postRdmaWrite<mode>(ep, ah, qpn, qkey,
-                          dev->scratch_local_addr, dev->scratch_lkey, 0u,
-                          dev->scratch_remote_addrs[peer],
-                          dev->scratch_remote_rkeys[peer]);
+      postRdmaWrite<mode>(ep, ah, qpn, qkey, dev->scratch_local_addr, dev->scratch_lkey, 0u,
+                          dev->scratch_remote_addrs[peer], dev->scratch_remote_rkeys[peer]);
     }
   }
-  (void)hasDescriptor; (void)descriptor;
-  (void)required; (void)given; (void)optFlags;
+  (void)hasDescriptor;
+  (void)descriptor;
+  (void)required;
+  (void)given;
+  (void)optFlags;
   coop.sync();
 }
 
 /* ── putValueImpl: runtime mode dispatcher ────────────────────────── */
 
 template <typename Coop, typename T>
-NCCL_DEVICE_INLINE static void putValueImpl(ncclGinCtx ctx, Coop coop, int peer,
-                                    ncclGinWindow_t dstWin, size_t dstOff, T srcVal,
-                                    ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
-                                    uint64_t signalOpArg, bool hasDescriptor,
-                                    ncclGinDescriptorSmem* descriptor,
-                                    cuda::thread_scope required, cuda::thread_scope given,
-                                    uint32_t optFlags) {
+NCCL_DEVICE_INLINE static void putValueImpl(ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin, size_t dstOff,
+                                            T srcVal, ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
+                                            uint64_t signalOpArg, bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
+                                            cuda::thread_scope required, cuda::thread_scope given, uint32_t optFlags) {
   switch ((ncclGinResourceSharingMode)ctx.resourceSharingMode) {
-    case NCCL_GIN_RESOURCE_SHARING_CTA:
-      putValueImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(
-        ctx, coop, peer, dstWin, dstOff, srcVal,
-        signal, signalOp, signalOpArg, hasDescriptor, descriptor,
-        required, given, optFlags);
-      break;
-    default:
-      putValueImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(
-        ctx, coop, peer, dstWin, dstOff, srcVal,
-        signal, signalOp, signalOpArg, hasDescriptor, descriptor,
-        required, given, optFlags);
-      break;
+  case NCCL_GIN_RESOURCE_SHARING_CTA:
+    putValueImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, peer, dstWin, dstOff, srcVal, signal, signalOp,
+                                                    signalOpArg, hasDescriptor, descriptor, required, given, optFlags);
+    break;
+  default:
+    putValueImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, peer, dstWin, dstOff, srcVal, signal, signalOp,
+                                                    signalOpArg, hasDescriptor, descriptor, required, given, optFlags);
+    break;
   }
 }
 
@@ -639,7 +609,7 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
   (void)ord;
   coop.sync();
   if (coop.thread_rank() == 0) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = getDevHandle(ctx);
+    nccl_ofi_gin_gdaki_dev_handle* dev = getDevHandle(ctx);
 
     /* For each endpoint with outstanding work, snapshot submitted_count
      * (scoped atomic load matching the relaxed bumps from the post
@@ -647,7 +617,7 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
      * reaches the snapshot. The HW counter is read with system-scope
      * acquire so the GPU bypasses caches and observes the latest NIC
      * update through PCIe-coherent memory. */
-    auto wait_for_endpoint = [abortFlag](nccl_ofi_gin_gdaki_dev_endpoint_handle &ep) -> bool {
+    auto wait_for_endpoint = [abortFlag](nccl_ofi_gin_gdaki_dev_endpoint_handle& ep) -> bool {
       uint64_t target = scopedAtomicLoad<ncclGinScope<mode>, cuda::memory_order_relaxed>(&ep.submitted_count);
 
       /* Drain-to-zero: outstanding = (submitted - completed) reduced to
@@ -685,12 +655,12 @@ NCCL_DEVICE_INLINE static void flushImplMode(ncclGinCtx ctx, Coop coop, cuda::me
 template <typename Coop>
 NCCL_DEVICE_INLINE static void flushImpl(ncclGinCtx ctx, Coop coop, cuda::memory_order ord, uint32_t* abortFlag) {
   switch ((ncclGinResourceSharingMode)ctx.resourceSharingMode) {
-    case NCCL_GIN_RESOURCE_SHARING_CTA:
-      flushImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, ord, abortFlag);
-      break;
-    default:
-      flushImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, ord, abortFlag);
-      break;
+  case NCCL_GIN_RESOURCE_SHARING_CTA:
+    flushImplMode<NCCL_GIN_RESOURCE_SHARING_CTA>(ctx, coop, ord, abortFlag);
+    break;
+  default:
+    flushImplMode<NCCL_GIN_RESOURCE_SHARING_GPU>(ctx, coop, ord, abortFlag);
+    break;
   }
 }
 
@@ -703,19 +673,15 @@ NCCL_DEVICE_INLINE static void flushImpl(ncclGinCtx ctx, Coop coop, cuda::memory
 template <>
 struct ncclGinApi_Put<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   template <typename Coop>
-  NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, int peer, bool hasWins,
-                                      ncclGinWindow_t dstWin, size_t dstOff, ncclGinWindow_t srcWin,
-                                      size_t srcOff, size_t bytes,
-                                      ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
-                                      uint64_t signalOpArg, bool hasCounter,
-                                      ncclGinCounter_t counterId, bool hasDescriptor,
-                                      ncclGinDescriptorSmem* descriptor,
-                                      cuda::thread_scope required, cuda::thread_scope given,
-                                      uint32_t optFlags = ncclGinOptFlagsDefault) {
-    nccl::gin::efa_gda::putImpl(
-      ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes,
-      signal, signalOp, signalOpArg, hasCounter, counterId,
-      hasDescriptor, descriptor, required, given, optFlags);
+  NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, int peer, bool hasWins, ncclGinWindow_t dstWin,
+                                      size_t dstOff, ncclGinWindow_t srcWin, size_t srcOff, size_t bytes,
+                                      ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp, uint64_t signalOpArg,
+                                      bool hasCounter, ncclGinCounter_t counterId, bool hasDescriptor,
+                                      ncclGinDescriptorSmem* descriptor, cuda::thread_scope required,
+                                      cuda::thread_scope given, uint32_t optFlags = ncclGinOptFlagsDefault) {
+    nccl::gin::efa_gda::putImpl(ctx, coop, peer, hasWins, dstWin, dstOff, srcWin, srcOff, bytes, signal, signalOp,
+                                signalOpArg, hasCounter, counterId, hasDescriptor, descriptor, required, given,
+                                optFlags);
   }
 };
 
@@ -724,17 +690,13 @@ struct ncclGinApi_Put<NCCL_NET_DEVICE_GIN_EFA_GDA> {
 template <>
 struct ncclGinApi_PutValue<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   template <typename Coop, typename T>
-  NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin,
-                                      size_t dstOff, T srcVal,
-                                      ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
-                                      uint64_t signalOpArg, bool hasDescriptor,
-                                      ncclGinDescriptorSmem* descriptor,
+  NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t dstWin, size_t dstOff,
+                                      T srcVal, ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp,
+                                      uint64_t signalOpArg, bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
                                       cuda::thread_scope required, cuda::thread_scope given,
                                       uint32_t optFlags = ncclGinOptFlagsDefault) {
-    nccl::gin::efa_gda::putValueImpl(
-      ctx, coop, peer, dstWin, dstOff, srcVal,
-      signal, signalOp, signalOpArg,
-      hasDescriptor, descriptor, required, given, optFlags);
+    nccl::gin::efa_gda::putValueImpl(ctx, coop, peer, dstWin, dstOff, srcVal, signal, signalOp, signalOpArg,
+                                     hasDescriptor, descriptor, required, given, optFlags);
   }
 };
 
@@ -744,14 +706,20 @@ template <>
 struct ncclGinApi_Get<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   template <typename Coop>
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, int peer, ncclGinWindow_t remoteWin, size_t remoteOff,
-                                      ncclGinWindow_t localWin, size_t localOff, size_t bytes,
-                                      bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
-                                      uint32_t optFlags = ncclGinOptFlagsDefault) {
+                                      ncclGinWindow_t localWin, size_t localOff, size_t bytes, bool hasDescriptor,
+                                      ncclGinDescriptorSmem* descriptor, uint32_t optFlags = ncclGinOptFlagsDefault) {
     coop.sync();
     /* TODO: implement with efa_cuda_init_rdma_read_wr */
-    (void)ctx; (void)peer; (void)remoteWin; (void)remoteOff;
-    (void)localWin; (void)localOff; (void)bytes;
-    (void)hasDescriptor; (void)descriptor; (void)optFlags;
+    (void)ctx;
+    (void)peer;
+    (void)remoteWin;
+    (void)remoteOff;
+    (void)localWin;
+    (void)localOff;
+    (void)bytes;
+    (void)hasDescriptor;
+    (void)descriptor;
+    (void)optFlags;
     coop.sync();
   }
 };
@@ -762,7 +730,12 @@ template <>
 struct ncclGinApi_FlushAsync<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, int peer, ncclGinRequest_t* outRequest, bool hasDescriptor,
                                       ncclGinDescriptorSmem* descriptor, uint32_t optFlags) {
-    (void)ctx; (void)peer; (void)outRequest; (void)hasDescriptor; (void)descriptor; (void)optFlags;
+    (void)ctx;
+    (void)peer;
+    (void)outRequest;
+    (void)hasDescriptor;
+    (void)descriptor;
+    (void)optFlags;
   }
 };
 
@@ -772,8 +745,12 @@ template <>
 struct ncclGinApi_Wait<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, ncclGinRequest_t& request, bool hasDescriptor,
                                       ncclGinDescriptorSmem* descriptor, cuda::memory_order ord, uint32_t* abortFlag) {
-    (void)ctx; (void)request; (void)hasDescriptor;
-    (void)descriptor; (void)ord; (void)abortFlag;
+    (void)ctx;
+    (void)request;
+    (void)hasDescriptor;
+    (void)descriptor;
+    (void)ord;
+    (void)abortFlag;
   }
 };
 
@@ -784,7 +761,8 @@ struct ncclGinApi_Flush<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   template <typename Coop>
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, Coop coop, bool hasDescriptor, ncclGinDescriptorSmem* descriptor,
                                       cuda::memory_order ord, uint32_t* abortFlag) {
-    (void)hasDescriptor; (void)descriptor;
+    (void)hasDescriptor;
+    (void)descriptor;
     nccl::gin::efa_gda::flushImpl(ctx, coop, ord, abortFlag);
   }
 };
@@ -794,9 +772,9 @@ struct ncclGinApi_Flush<NCCL_NET_DEVICE_GIN_EFA_GDA> {
 template <>
 struct ncclGinApi_GetSignalPtr<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static ncclGinOffsetPtr call(ncclGinCtx ctx, ncclGinSignal_t signalId) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = nccl::gin::efa_gda::getDevHandle(ctx);
-    nccl_ofi_gin_gdaki_dev_counter_handle *h = dev->signal_handles[signalId];
-    return { (uint64_t *)h->cntr_value, h->cntr_offset };
+    nccl_ofi_gin_gdaki_dev_handle* dev = nccl::gin::efa_gda::getDevHandle(ctx);
+    nccl_ofi_gin_gdaki_dev_counter_handle* h = dev->signal_handles[signalId];
+    return {(uint64_t*)h->cntr_value, h->cntr_offset};
   }
 };
 
@@ -805,9 +783,9 @@ struct ncclGinApi_GetSignalPtr<NCCL_NET_DEVICE_GIN_EFA_GDA> {
 template <>
 struct ncclGinApi_GetCounterPtr<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static ncclGinOffsetPtr call(ncclGinCtx ctx, ncclGinCounter_t counterId) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = nccl::gin::efa_gda::getDevHandle(ctx);
-    nccl_ofi_gin_gdaki_dev_counter_handle *h = dev->counter_handles[counterId];
-    return { (uint64_t *)h->cntr_value, h->cntr_offset };
+    nccl_ofi_gin_gdaki_dev_handle* dev = nccl::gin::efa_gda::getDevHandle(ctx);
+    nccl_ofi_gin_gdaki_dev_counter_handle* h = dev->counter_handles[counterId];
+    return {(uint64_t*)h->cntr_value, h->cntr_offset};
   }
 };
 
@@ -816,17 +794,14 @@ struct ncclGinApi_GetCounterPtr<NCCL_NET_DEVICE_GIN_EFA_GDA> {
 template <>
 struct ncclGinApi_ResetSignal<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, ncclGinSignalDescriptor signal) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = nccl::gin::efa_gda::getDevHandle(ctx);
-    assert(signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED
-           && "EFA GDA ResetSignal: only INDEXED signals are supported");
-    assert((int)signal.indexedSignal.signalId < dev->nSignals
-           && "EFA GDA ResetSignal: signalId out of range");
+    nccl_ofi_gin_gdaki_dev_handle* dev = nccl::gin::efa_gda::getDevHandle(ctx);
+    assert(signal.type == NCCL_GIN_SIGNAL_TYPE_INDEXED && "EFA GDA ResetSignal: only INDEXED signals are supported");
+    assert((int)signal.indexedSignal.signalId < dev->nSignals && "EFA GDA ResetSignal: signalId out of range");
     /* Offset-based reset: the NIC counter cannot be written, so snapshot
      * its current value into cntr_offset. Subsequent reads/waits subtract
      * the offset, making the signal appear reset. */
-    nccl_ofi_gin_gdaki_dev_counter_handle *h =
-        dev->signal_handles[signal.indexedSignal.signalId];
-    h->cntr_offset = nccl::gin::efa_gda::hwCounterLoad((uint64_t *)h->cntr_value);
+    nccl_ofi_gin_gdaki_dev_counter_handle* h = dev->signal_handles[signal.indexedSignal.signalId];
+    h->cntr_offset = nccl::gin::efa_gda::hwCounterLoad((uint64_t*)h->cntr_value);
   }
 };
 
@@ -835,13 +810,12 @@ struct ncclGinApi_ResetSignal<NCCL_NET_DEVICE_GIN_EFA_GDA> {
 template <>
 struct ncclGinApi_ResetCounter<NCCL_NET_DEVICE_GIN_EFA_GDA> {
   NCCL_DEVICE_INLINE static void call(ncclGinCtx ctx, ncclGinCounter_t counterId) {
-    nccl_ofi_gin_gdaki_dev_handle *dev = nccl::gin::efa_gda::getDevHandle(ctx);
-    assert((int)counterId < dev->nCounters
-           && "EFA GDA ResetCounter: counterId out of range");
+    nccl_ofi_gin_gdaki_dev_handle* dev = nccl::gin::efa_gda::getDevHandle(ctx);
+    assert((int)counterId < dev->nCounters && "EFA GDA ResetCounter: counterId out of range");
     /* Offset-based reset: snapshot the NIC counter into cntr_offset
      * instead of writing the (NIC-owned) counter. */
-    nccl_ofi_gin_gdaki_dev_counter_handle *h = dev->counter_handles[counterId];
-    h->cntr_offset = nccl::gin::efa_gda::hwCounterLoad((uint64_t *)h->cntr_value);
+    nccl_ofi_gin_gdaki_dev_counter_handle* h = dev->counter_handles[counterId];
+    h->cntr_offset = nccl::gin::efa_gda::hwCounterLoad((uint64_t*)h->cntr_value);
   }
 };
 
