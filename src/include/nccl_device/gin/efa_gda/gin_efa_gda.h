@@ -305,10 +305,12 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
       uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
       bool must_ring = (!aggregate) || (chunk_next - db_rung >= max_batch);
       if (must_ring) {
-        /* Drain the async .mmio doorbell to the PCIe-visible point before
-         * publishing dbrung_ref. */
+        /* When this ring covers deferred slots written by OTHER warps
+         * (chunk_base != db_rung), drain the async .mmio doorbell to the
+         * PCIe-visible point before publishing dbrung_ref. Otherwise, skip it. */
         storeSqDoorbell(qp->sq.wq.db, chunk_next);
-        cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_system);
+        if (chunk_base != db_rung)
+          cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_system);
         scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)(chunk_next - db_rung));
         dbrung_ref.store(chunk_next, cuda::memory_order_release);
       }
