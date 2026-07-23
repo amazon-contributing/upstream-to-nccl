@@ -27,6 +27,13 @@
 /* efa-dp-direct device functions (inline implementations) */
 #include "../../transport/net_efa_gda/efa-dp-direct/include/device/efa_cuda_dp_impl.cuh"
 
+/* st.async.mmio.release for the SQ doorbell requires sm_100+. Gate on __CUDA_ARCH__. */
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#define NCCL_EFA_GDA_HAS_ASYNC_MMIO_DB 1
+#else
+#define NCCL_EFA_GDA_HAS_ASYNC_MMIO_DB 0
+#endif
+
 namespace nccl {
 namespace gin {
 namespace efa_gda {
@@ -82,35 +89,16 @@ NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t* ptr) {
   return scopedAtomicLoad<cuda::thread_scope_system, cuda::memory_order_acquire>(ptr);
 }
 
-/* ── ringDoorbell: shared doorbell-ring used by the post-path ring sites ─
-
- * Rings the SQ doorbell to `target`, then advances the bookkeeping cursors:
- * submitted_count grows by the newly-rung span (target - db_rung) so Flush's
- * completion wait is exact, and db_rung (wqes_posted) is published to record
- * how far the doorbell has been rung.
- *
- * Preconditions the caller must satisfy:
- *   - The caller is allowed to ring up to `target` (it holds the doorbell
- *     turn, or is draining already-handed-off slots).
- *   - Every WQE in [db_rung, target) is already visible to the NIC. Each
- *     producing group publishes its own WQEs with __threadfence_system()
- *     before handoff, so the WQE data is system-visible by the time any slot
- *     is eligible to be rung here.
- *
- * Only a post-doorbell fence is emitted (to order the doorbell MMIO write).
- * A pre-doorbell publish fence would be useless: __threadfence_system()
- * orders only the calling thread's own writes, and the WQEs being rung were
- * written by other threads. */
-template <ncclGinResourceSharingMode mode>
-NCCL_DEVICE_INLINE static void ringDoorbell(efa_cuda_qp* qp, uint64_t* submitted_count_ptr,
-                                            cuda::atomic_ref<uint32_t, ncclGinScope<mode>>& dbrung_ref,
-                                            uint32_t db_rung, uint32_t target) {
-  *qp->sq.wq.db = target;
-  /* Order the doorbell MMIO write. Use acq_rel (MEMBAR.ALL.SYS) instead of
-   * __threadfence_system (MEMBAR.SC.SYS). */
-  cuda::atomic_thread_fence(cuda::memory_order_acq_rel, cuda::thread_scope_system);
-  scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)(target - db_rung));
-  dbrung_ref.store(target, cuda::memory_order_release);
+/* Store `target` to the SQ doorbell MMIO register. sm_100+: a non-blocking
+ * st.async.mmio.release.sys store carries .mmio device-register semantics and
+ * .release ordering. sm_90: plain store (the caller pairs it with a fence). */
+NCCL_DEVICE_INLINE static void storeSqDoorbell(uint32_t* db, uint32_t target) {
+#if NCCL_EFA_GDA_HAS_ASYNC_MMIO_DB
+  uint64_t gaddr = (uint64_t)__cvta_generic_to_global(db);
+  asm volatile("st.async.mmio.release.sys.global.u32 [%0], %1;" ::"l"(gaddr), "r"(target) : "memory");
+#else
+  *db = target;
+#endif
 }
 
 /* ── postRdmaWrite: shared post path for Put and PutValue ─────────── */
@@ -241,7 +229,9 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
         if (base_ref.load(cuda::memory_order_acquire) == chunk_base) {
           uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
           if (chunk_base != db_rung) {   /* deferred, already-written batch */
-            ringDoorbell<mode>(qp, submitted_count_ptr, dbrung_ref, db_rung, chunk_base);
+            storeSqDoorbell(qp->sq.wq.db, chunk_base);
+            scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)(chunk_base - db_rung));
+            dbrung_ref.store(chunk_base, cuda::memory_order_release);
           }
         }
       }
@@ -315,7 +305,12 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
       uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
       bool must_ring = (!aggregate) || (chunk_next - db_rung >= max_batch);
       if (must_ring) {
-        ringDoorbell<mode>(qp, submitted_count_ptr, dbrung_ref, db_rung, chunk_next);
+        /* Drain the async .mmio doorbell to the PCIe-visible point before
+         * publishing dbrung_ref. */
+        storeSqDoorbell(qp->sq.wq.db, chunk_next);
+        cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_system);
+        scopedAtomicAdd<ncclGinScope<mode>, cuda::memory_order_relaxed>(submitted_count_ptr, (uint64_t)(chunk_next - db_rung));
+        dbrung_ref.store(chunk_next, cuda::memory_order_release);
       }
       base_ref.store(chunk_next, cuda::memory_order_release);   /* hand off to next group */
     }
