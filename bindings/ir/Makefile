@@ -141,3 +141,10 @@ clean:
 	rm -rf $(OBJDIR) $(FINAL_BC) $(FINAL_LTO_IR) $(WRAPPER_HEADER)
 
 .PHONY: llvm_ir ltoir build clean
+
+# Serialize IR-gen to avoid race
+ifneq ($(EMIT_LLVM_IR), 0)
+ifneq ($(NCCL_EMIT_LTO_IR), 0)
+$(FINAL_LTO_IR): | $(FINAL_BC)
+endif
+endif

@@ -54,6 +54,13 @@ static constexpr cuda::thread_scope ncclGinScope =
  * has wrapped. Never compare absolute counter values. */
 static constexpr uint32_t EFA_CNTR_MASK = 0x7fffffffu;
 
+/* Hardware cap on a single RDMA write: efadv_device_attr.max_rdma_size,
+ * 1 GiB on current EFA devices. A WQE exceeding it fails on the NIC as a CQ
+ * error, which this CQ-less path never observes, so the put hangs; the u32
+ * SGE length field additionally truncates sizes >= 4 GiB. Larger puts are
+ * split into chunks of at most this size in putImplMode. */
+static constexpr uint32_t EFA_GDA_MAX_WRITE_SIZE = 1u << 30;
+
 /* ── Atomic primitives parameterized on scope and memory order ────── */
 
 template <cuda::thread_scope Scope, cuda::memory_order Order>
@@ -70,16 +77,16 @@ NCCL_DEVICE_INLINE static void scopedAtomicAdd(uint64_t* ptr, uint64_t val) {
 
 /* ── NIC-written hardware counter (FI_WRITE / FI_REMOTE_WRITE) ────── */
 
-/* Read a NIC-written hardware counter from GPU memory. Uses system-scope
- * acquire so the load is coherent with the NIC's PCIe writes (bypasses
- * GPU caches) and subsequent operations on this thread cannot be
- * reordered to before the load. The acquire matches libfabric's
- * local-completion contract: when this load observes the counter has
- * reached a target, the NIC's prior side effects (e.g. source-buffer
- * DMA-reads complete) are ordered-before whatever this thread does
- * next (e.g. overwriting that source buffer or reusing the slot). */
+/* Read a NIC-written hardware counter from GPU memory. System scope makes
+ * the load coherent with the NIC's PCIe writes (bypasses GPU caches).
+ * Acquire is the default and matches libfabric's local-completion contract:
+ * when this load observes the counter has reached a target, the NIC's prior
+ * side effects (e.g. source-buffer DMA-reads complete) are ordered-before
+ * whatever this thread does next (e.g. overwriting that source buffer or
+ * reusing the slot). */
+template <cuda::memory_order Order = cuda::memory_order_acquire>
 NCCL_DEVICE_INLINE static uint64_t hwCounterLoad(uint64_t* ptr) {
-  return scopedAtomicLoad<cuda::thread_scope_system, cuda::memory_order_acquire>(ptr);
+  return scopedAtomicLoad<cuda::thread_scope_system, Order>(ptr);
 }
 
 /* ── ringDoorbell: shared doorbell-ring used by the post-path ring sites ─
@@ -105,7 +112,8 @@ template <ncclGinResourceSharingMode mode>
 NCCL_DEVICE_INLINE static void ringDoorbell(efa_cuda_qp* qp, uint64_t* submitted_count_ptr,
                                             cuda::atomic_ref<uint32_t, ncclGinScope<mode>>& dbrung_ref,
                                             uint32_t db_rung, uint32_t target) {
-  *qp->sq.wq.db = target;
+  uint64_t dbAddr = (uint64_t)__cvta_generic_to_global(qp->sq.wq.db);
+  asm volatile("st.mmio.relaxed.sys.global.b32 [%0], %1;" : : "l"(dbAddr), "r"(target) : "memory");
   /* Order the doorbell MMIO write. Use acq_rel (MEMBAR.ALL.SYS) instead of
    * __threadfence_system (MEMBAR.SC.SYS). */
   cuda::atomic_thread_fence(cuda::memory_order_acq_rel, cuda::thread_scope_system);
@@ -237,7 +245,7 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
        * <= max_batch, so one doorbell drains it. If we do not yet hold the
        * turn, a lower group does and will either ring (advancing db_rung) or
        * hand off (advancing base_ref); keep checking until our chunk fits. */
-      while (chunk_next - dbrung_ref.load(cuda::memory_order_acquire) > max_batch) {
+      while (chunk_next - dbrung_ref.load(cuda::memory_order_relaxed) > max_batch) {
         if (base_ref.load(cuda::memory_order_acquire) == chunk_base) {
           uint32_t db_rung = dbrung_ref.load(cuda::memory_order_relaxed);
           if (chunk_base != db_rung) {   /* deferred, already-written batch */
@@ -246,8 +254,7 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
         }
       }
       /* SQ ring-overflow backpressure on the chunk's high-water slot.
-       * System-scope acquire so we see the latest NIC FI_WRITE update
-       * and the WQE stores below can't hoist above this load.
+       * Poll the NIC FI_WRITE counter with system-scope relaxed loads.
        *
        * In-flight count is computed as a 31-bit modular difference
        * (producer chunk_next minus the NIC FI_WRITE counter): the HW
@@ -255,7 +262,8 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
        * widened subtraction would underflow once either side wraps.
        * The true in-flight depth is bounded by sq_size (4096) « 2^31,
        * so the masked difference is exact. */
-      while (((chunk_next - (uint32_t)hwCounterLoad(local_cntr_ptr)) & EFA_CNTR_MASK) > sq_size_val) {
+      while (((chunk_next - (uint32_t)hwCounterLoad<cuda::memory_order_relaxed>(local_cntr_ptr)) & EFA_CNTR_MASK) >
+             sq_size_val) {
         /* spin */
       }
     }
@@ -285,7 +293,17 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
       EFA_SET(&wr.meta.ctrl2, EFA_IO_TX_META_DESC_PHASE, wqe_phase);
       uint64_t* src = (uint64_t*)&wr;
       uint64_t* dst = (uint64_t*)(qp->sq.wq.buf + sq_idx * sizeof(efa_io_tx_wqe));
-      for (int i = 0; i < 8; i++) dst[i] = src[i];
+      /* One final system-scope fence publishes the complete WQE after these
+       * relaxed MMIO stores. */
+      uint64_t dstAddr = (uint64_t)__cvta_generic_to_global(dst);
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        uint64_t value = src[i];
+        asm volatile("st.mmio.relaxed.sys.global.b64 [%0], %1;"
+                     :
+                     : "l"(dstAddr + i * sizeof(uint64_t)), "l"(value)
+                     : "memory");
+      }
       /* Publish this group's WQE writes to system scope so they are visible
        * to the NIC whenever any doorbell rings a slot in this range. */
       cuda::atomic_thread_fence(cuda::memory_order_acq_rel, cuda::thread_scope_system);
@@ -294,7 +312,7 @@ NCCL_DEVICE_INLINE static void postRdmaWrite(nccl_ofi_gin_gdaki_dev_endpoint_han
 
     if (is_leader) {
       /* Doorbell-order rendezvous: take the turn in strict slot order. */
-      while (base_ref.load(cuda::memory_order_acquire) != chunk_base) {
+      while (base_ref.load(cuda::memory_order_relaxed) != chunk_base) {
         /* spin */
       }
 
@@ -338,7 +356,6 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
     nccl_ofi_gin_gdaki_dev_handle* dev = getDevHandle(ctx);
 
     bool hasPayload = hasWins && bytes > 0;
-    bool needsSignalEp = (signal.type != NCCL_GIN_SIGNAL_TYPE_NONE) || hasCounter;
 
     /* This backend supports INDEXED signals only. EFA's FI_REMOTE_WRITE
      * counter ticks exactly once per inbound write and has no atomic-add,
@@ -350,17 +367,36 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
            "EFA GDA: signalId out of range");
     assert((!hasCounter || (int)counterId < dev->nCounters) && "EFA GDA: counterId out of range");
 
-    if (hasPayload || needsSignalEp) {
-      /* Two WQE patterns:
+    /* A Put ALWAYS posts at least one WQE -- even with no payload and no
+     * signal/counter, where it degenerates to a 0-byte write to the peer's
+     * per-context scratch via the peer DATA endpoint (target slot 0), which
+     * binds no FI_REMOTE_WRITE: remotely unobservable.
+     *
+     * Empty puts cannot be dropped as no-ops, because under
+     * ncclGinOptFlagsAggregateRequests a put carries a LOCAL side effect: its
+     * non-aggregated doorbell rendezvous in postRdmaWrite is what publishes
+     * earlier deferred WQEs on the QP. Dropping an "empty" put would make it
+     * impossible to terminate a deferred stream whose last real put was
+     * aggregated -- the tail WQEs (and their signals) would never be handed to
+     * the NIC and the peer would wait forever. Callers that want to elide
+     * empty puts for performance should skip at the call site, where "empty"
+     * is actually known. */
+    {
+      /* Three WQE patterns:
        *
        * (a) Data put: posts an RDMA write of the user payload.
-       *     Routed through signal/counter endpoint when needsSignalEp
-       *     so the receiver's FI_REMOTE_WRITE fires on completion;
-       *     otherwise routed through the data endpoint.
+       *     Routed through the signal/counter endpoint when a signal or
+       *     counter is attached, so the receiver's FI_REMOTE_WRITE fires
+       *     on completion; otherwise routed through the data endpoint.
        *
        * (b) Signal-only: posts a 0-byte RDMA write into the peer's
        *     per-context scratch buffer. The write event bumps the
-       *     receiver's FI_REMOTE_WRITE counter on the signal endpoint. */
+       *     receiver's FI_REMOTE_WRITE counter on the signal endpoint.
+       *
+       * (c) Empty (no payload, no signal/counter): same 0-byte scratch
+       *     write as (b) but addressed to the peer DATA endpoint, which
+       *     binds no FI_REMOTE_WRITE -- remotely unobservable. Posted for
+       *     its local doorbell rendezvous (see the block comment above). */
       uint64_t absSrcAddr;
       uint64_t absDstAddr;
       uint32_t dstRkey;
@@ -462,7 +498,60 @@ NCCL_DEVICE_INLINE static void putImplMode(ncclGinCtx ctx, Coop coop, int peer, 
       const uint16_t dataSigQpn = dev->data.target_remote_qpns[targetIdx];
       const uint32_t dataSigQkey = dev->data.target_qkey[targetIdx];
 
-      /* First write: payload (hasPayload) or 0-byte scratch (signal-only),
+      /* Chunk payloads that exceed the EFA per-write limit.
+       *
+       * A single RDMA write is capped at EFA_GDA_MAX_WRITE_SIZE (1 GiB).
+       * Split larger payloads into full-size leading chunks plus a tail
+       * (<= cap); the tail is posted by the normal signal/counter-carrying
+       * path below.
+       *
+       * Leading chunks target the peer's DATA EP (slot 0): no remote signal
+       * fires and the caller's counter does not tick. They are posted
+       * non-aggregated so their doorbells ring (the drain below only counts
+       * rung WQEs). */
+      if (hasPayload && bytes > (size_t)EFA_GDA_MAX_WRITE_SIZE) {
+        const size_t cap = (size_t)EFA_GDA_MAX_WRITE_SIZE;
+        const size_t nLeading = (bytes - 1) / cap; /* tail is (0, cap] */
+        /* Peer's DATA EP tuple: target slot 0 -> idx = 0*nranks + peer. */
+        const uint32_t dataIdx = (uint32_t)peer;
+        const uint16_t dAh = dev->data.target_address_handles[dataIdx];
+        const uint16_t dQpn = dev->data.target_remote_qpns[dataIdx];
+        const uint32_t dQkey = dev->data.target_qkey[dataIdx];
+        for (size_t i = 0; i < nLeading; i++) {
+          postRdmaWrite<mode>(&dev->data, dAh, dQpn, dQkey, absSrcAddr + i * cap, srcLkey, (uint32_t)cap,
+                              absDstAddr + i * cap, dstRkey, ncclGinOptFlagsDefault);
+        }
+        /* EFA SRD is unordered: the tail landing does not imply the leading
+         * chunks landed. So when the tail announces completion (signal or
+         * counter), first wait for the leading chunks' local completions: a
+         * local completion means the write has been queued towards the
+         * receiver's PCIe, so any write issued after it to that same PCIe
+         * destination is delivered after it by PCIe ordering rules. The tail
+         * therefore lands behind the whole payload, making its signal/counter
+         * mean the data is there and the source buffer safe to reuse.
+         * A plain put announces nothing, so nothing can observe its chunks
+         * out of order; the wait is deferred to the caller's later flush /
+         * signaled put / barrier. The drain is whole-endpoint (outstanding
+         * == 0, same loop as flushImplMode) and must be: the FI_WRITE
+         * counter does not attribute completions to WQEs, so a fully
+         * drained endpoint is the only state that proves THIS put's chunks
+         * completed. That is required for correct signal delivery, even
+         * though it also waits on concurrent posters' writes. */
+        if (isIndexed || hasCounter) {
+          cuda::atomic_ref<uint64_t, ncclGinScope<mode>> submitted_ref(dev->data.submitted_count);
+          while (((((uint32_t)submitted_ref.load(cuda::memory_order_relaxed)) -
+                   (uint32_t)hwCounterLoad(dev->data.local_cntr_value)) &
+                  EFA_CNTR_MASK) != 0) {
+            /* spin: leading chunks in flight */
+          }
+        }
+        absSrcAddr += nLeading * cap;
+        absDstAddr += nLeading * cap;
+        writeBytes = (uint32_t)(bytes - nLeading * cap);
+      }
+
+      /* Final write: the payload tail (the WHOLE payload when no chunking
+       * occurred above; hasPayload) or 0-byte scratch (signal-only),
        * on the counterId-selected poster so the local counter ticks once,
        * addressed to the resolved target so the receiver's FI_REMOTE_WRITE
        * fires once. absSrcAddr/absDstAddr/writeBytes already point at the

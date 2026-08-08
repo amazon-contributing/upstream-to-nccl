@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import cutlass
 import cutlass.cute as cute
 from cutlass.cutlass_dsl import ir
@@ -10,6 +12,10 @@ from ...resources import RegisteredWindowHandle
 from . import _bindings
 from ._helpers import _to_value
 from ._structs import _LLVMPtrType, ncclTeam as Team
+from .handles import MultimemHandle
+
+if TYPE_CHECKING:
+    from .comm import DevComm
 
 
 class Window:
@@ -108,6 +114,36 @@ class Window:
                 self.ptr, cutlass.Int64(offset), cutlass.Int32(peer))
         return _bindings.nccl_get_peer_pointer_team(
             self.ptr, cutlass.Int64(offset), _to_value(team), cutlass.Int32(peer))
+
+    def multimem_pointer(
+        self, offset: int, mm_handle: MultimemHandle
+    ) -> ir.Value:
+        """Translate ``offset`` to its multimem virtual address.
+
+        Args:
+            offset: Byte offset within the window.
+            mm_handle: Multimem handle covering this window —
+                :py:attr:`DevComm.lsa_multimem`, or one passed in from the
+                host for a non-LSA team.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_multimem_pointer(
+            self.ptr, cutlass.Int64(offset), _to_value(mm_handle))
+
+    def lsa_multimem_pointer(self, offset: int, dev_comm: DevComm) -> ir.Value:
+        """Translate ``offset`` to the LSA multimem virtual address.
+
+        Args:
+            offset: Byte offset within the window.
+            dev_comm: Device communicator supplying the LSA multimem handle.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_lsa_multimem_pointer(
+            self.ptr, cutlass.Int64(offset), dev_comm.ptr)
 
     def tensor(self, dtype, layout, offset: int = 0):
         """Construct a ``cute.Tensor`` view over the registered buffer.

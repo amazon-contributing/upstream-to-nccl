@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from nccl.bindings import nccl as _nccl_bindings
 
-from nccl._binding_helpers import LowppSpec
+from nccl.core._binding_helpers import LowppSpec
 
 __all__ = ["NCCLTeam"]
 
@@ -20,10 +20,9 @@ __all__ = ["NCCLTeam"]
 class NCCLTeam(LowppSpec, lowpp_cls=_nccl_bindings.Team):
     """A NCCL team: ``(n_ranks, rank, stride)`` view over a communicator.
 
-    Produced by
-    :py:attr:`~nccl.core.communicator.Communicator.team_world`,
-    :py:attr:`~nccl.core.communicator.Communicator.team_lsa`, and
-    :py:attr:`~nccl.core.communicator.Communicator.team_rail`.
+    Produced by :py:attr:`~nccl.core.Communicator.team_world`,
+    :py:attr:`~nccl.core.Communicator.team_lsa`, and
+    :py:attr:`~nccl.core.Communicator.team_rail`.
     """
 
     n_ranks: int

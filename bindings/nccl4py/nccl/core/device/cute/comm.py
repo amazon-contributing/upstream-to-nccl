@@ -19,11 +19,9 @@ from ._structs import (
     DevCommValue,
     ncclGin_C,
     ncclTeam as Team,
-    ncclLsaBarrierHandle,
-    ncclGinBarrierHandle,
-    ncclMultimemHandle,
 )
 from .gin import Gin
+from .handles import GinBarrierHandle, LsaBarrierHandle, MultimemHandle
 from .types import GinBackendMask, GinResourceSharingMode
 
 
@@ -47,10 +45,19 @@ def _materialize_dev_comm(value, *, loc=None, ip=None) -> ir.Value:
     """Materialize a by-value DevComm in the device function entry block."""
     entry_block = _device_function_entry_block()
     struct_value = value.__extract_mlir_values__()[0]
-    # ip is not forwarded: the alloca/store must land at entry-block begin
-    # so the pointer dominates every use, not at the caller's position.
+    # ip is not forwarded: the alloca must land at entry-block begin so the
+    # pointer dominates every use, not at the caller's position.
     with ir.InsertionPoint.at_block_begin(entry_block):
         ptr = _alloca_struct(DevCommValue, alignment=8, loc=loc)
+
+    # The store has to follow both operands. The struct is a block argument
+    # while it stays within one block, and then it already dominates the
+    # alloca. But a DevComm used on both sides of a conditional is threaded
+    # through the region by the DSL, making the value an scf.if result — so
+    # anchor the store to whatever defines it.
+    owner = struct_value.owner
+    after = ptr.owner if isinstance(owner, ir.Block) else owner
+    with ir.InsertionPoint.after(after):
         llvm.store(struct_value, ptr, loc=loc)
     return ptr
 
@@ -133,29 +140,34 @@ class DevComm:
 
     # === Embedded barrier handles ===
 
-    @property
-    def lsa_barrier(self) -> ncclLsaBarrierHandle:
-        return self.value.lsa_barrier
+    # Wrapped so an embedded handle and a host-passed one are the same type.
 
     @property
-    def rail_gin_barrier(self) -> ncclGinBarrierHandle:
-        return self.value.rail_gin_barrier
+    def lsa_barrier(self) -> LsaBarrierHandle:
+        return LsaBarrierHandle.from_native_struct(self.value.lsa_barrier)
 
     @property
-    def hybrid_lsa_barrier(self) -> ncclLsaBarrierHandle:
-        return self.value.hybrid_lsa_barrier
+    def rail_gin_barrier(self) -> GinBarrierHandle:
+        return GinBarrierHandle.from_native_struct(self.value.rail_gin_barrier)
 
     @property
-    def hybrid_rail_gin_barrier(self) -> ncclGinBarrierHandle:
-        return self.value.hybrid_rail_gin_barrier
+    def hybrid_lsa_barrier(self) -> LsaBarrierHandle:
+        return LsaBarrierHandle.from_native_struct(
+            self.value.hybrid_lsa_barrier)
 
     @property
-    def world_gin_barrier(self) -> ncclGinBarrierHandle:
-        return self.value.world_gin_barrier
+    def hybrid_rail_gin_barrier(self) -> GinBarrierHandle:
+        return GinBarrierHandle.from_native_struct(
+            self.value.hybrid_rail_gin_barrier)
 
     @property
-    def lsa_multimem(self) -> ncclMultimemHandle:
-        return self.value.lsa_multimem
+    def world_gin_barrier(self) -> GinBarrierHandle:
+        return GinBarrierHandle.from_native_struct(
+            self.value.world_gin_barrier)
+
+    @property
+    def lsa_multimem(self) -> MultimemHandle:
+        return MultimemHandle.from_native_struct(self.value.lsa_multimem)
 
     # === Team factories ===
 
@@ -200,6 +212,79 @@ class DevComm:
         """
         return cutlass.Int32(_bindings.nccl_team_rank_to_lsa(
             self.ptr, _to_value(team), cutlass.Int32(rank)))
+
+    # === Resource buffer pointers ===
+
+    def resource_buffer_local_pointer(self, handle: int) -> ir.Value:
+        """Translate a resource handle to the local buffer address.
+
+        Args:
+            handle: ``ncclDevResourceHandle`` from ``DevCommResource``.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_resource_buffer_local_pointer(
+            self.ptr, cutlass.Uint32(handle))
+
+    def resource_buffer_lsa_pointer(self, handle: int, peer: int) -> ir.Value:
+        """Translate a resource handle to ``peer``'s LSA buffer address.
+
+        Args:
+            handle: ``ncclDevResourceHandle`` from ``DevCommResource``.
+            peer: LSA-team peer rank.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_resource_buffer_lsa_pointer(
+            self.ptr, cutlass.Uint32(handle), cutlass.Int32(peer))
+
+    def resource_buffer_peer_pointer(
+        self, handle: int, team: Team, peer: int
+    ) -> ir.Value:
+        """Translate a resource handle to ``peer``'s buffer address.
+
+        Args:
+            handle: ``ncclDevResourceHandle`` from ``DevCommResource``.
+            team: Team to address within.
+            peer: Rank within ``team``.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_resource_buffer_peer_pointer(
+            self.ptr, cutlass.Uint32(handle), _to_value(team),
+            cutlass.Int32(peer))
+
+    def resource_buffer_multimem_pointer(
+        self, handle: int, mm_handle: MultimemHandle
+    ) -> ir.Value:
+        """Translate a resource handle to its multimem buffer address.
+
+        Args:
+            handle: ``ncclDevResourceHandle`` from ``DevCommResource``.
+            mm_handle: Multimem handle covering the resource window —
+                :py:attr:`lsa_multimem`, or one passed in from the host for
+                a non-LSA team.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_resource_buffer_multimem_pointer(
+            self.ptr, cutlass.Uint32(handle), _to_value(mm_handle))
+
+    def resource_buffer_lsa_multimem_pointer(self, handle: int) -> ir.Value:
+        """Translate a resource handle to its LSA multimem buffer address.
+
+        Args:
+            handle: ``ncclDevResourceHandle`` from ``DevCommResource``.
+
+        Returns:
+            ``!llvm.ptr`` MLIR value.
+        """
+        return _bindings.nccl_get_resource_buffer_lsa_multimem_pointer(
+            self.ptr, cutlass.Uint32(handle))
 
     # === Gin factory ===
 
