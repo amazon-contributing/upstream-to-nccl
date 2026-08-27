@@ -14,7 +14,7 @@
     check is performed; a mismatch can cause link errors or incorrect kernel
     behavior.
 
-See ``examples/cute/main.py`` for a complete, runnable example.
+See ``examples/cute/00_basic.py`` for a complete, runnable example.
 """
 
 try:
@@ -27,7 +27,7 @@ except ImportError as e:
         "    pip install 'nccl4py[cu13]'   # for CUDA 13"
     ) from e
 
-from . import types, coop, handles, comm, window, gin, barrier, reduce_copy
+from . import types, coop, handles, comm, window, gin, barrier, reduce_copy, runtime
 from .types import *    # MemoryOrder, ThreadScope, GinFenceLevel, GinBackendMask, GinResourceSharingMode
 from .coop import *     # Coop, cta, warp, thread, lanes, warp_span
 from .handles import *  # MultimemHandle, LsaBarrierHandle, GinBarrierHandle
@@ -46,6 +46,7 @@ __all__ = [
     "gin",
     "barrier",
     "reduce_copy",
+    "runtime",
     *types.__all__,
     *coop.__all__,
     *handles.__all__,

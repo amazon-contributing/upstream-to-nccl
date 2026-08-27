@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+#
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# See LICENSE.txt for more license information
+#
 """1 MiB NCCL GIN put example using CuTeDSL ``cute.Tensor`` views.
 
 Demonstrates the canonical workflow for the nccl4py CuTeDSL device API:
@@ -19,11 +26,13 @@ The annotations are what pick the form: CuTeDSL validates an argument
 against its annotation before it looks for an adapter, so annotating the
 converted type rejects a raw resource outright.
 
-Run with two MPI ranks::
+Run with exactly two MPI ranks; the transfer is hardcoded from rank 0 to
+rank 1::
 
-    mpirun -n 2 python main.py
+    mpirun -n 2 python 00_basic.py
 """
 
+import os
 import sys
 
 try:
@@ -49,6 +58,9 @@ import cutlass.cute as cute
 from cutlass.cute.arch.nvvm_wrappers import WARP_SIZE
 import nccl.core as nccl
 import nccl.core.device.cute as nccl_cute
+
+
+NAME = os.path.basename(__file__)
 
 # 1 MiB transfer: 131072 Int64 elements * 8 bytes = 1,048,576 bytes.
 NUM_ELEMS = 1024 * 1024 // 8
@@ -183,16 +195,25 @@ def test_nccl_put_resources(
 
 
 def main():
-    """Run a 1 MiB GIN put + signal demo across two MPI ranks.
+    """Run a 1 MiB GIN put + signal demo across exactly two MPI ranks.
 
     Returns:
-        Exit code; 0 on success. Host-side validation on the receiver
-        prints ``[SUCCESS]`` or ``[ERROR N / NUM_ELEMS mismatches]``.
+        Exit code; 1 on a wrong rank count or a payload mismatch, otherwise 0.
+        Host-side validation prints ``[SUCCESS]`` or
+        ``[ERROR N / NUM_ELEMS mismatches]``.
     """
     comm_mpi = MPI.COMM_WORLD
     rank = comm_mpi.Get_rank()
     nranks = comm_mpi.Get_size()
     root = 0
+
+    if nranks != 2:
+        if rank == root:
+            print(f"\n[{NAME}] ERROR: needs exactly 2 ranks, got {nranks}")
+        return 1
+
+    if rank == root:
+        print(f"\n===== {NAME} =====", flush=True)
 
     device = Device(rank % system.get_num_devices())
     device.set_current()
@@ -212,7 +233,8 @@ def main():
         return 0
 
     if rank == root:
-        print(f"Running with {nranks} ranks, transferring {NUM_ELEMS * 8} bytes...")
+        print(f"Running with {nranks} ranks, transferring {NUM_ELEMS * 8} bytes "
+              f"from rank 0 to rank {DST_RANK}...")
 
     # Rank 0 fills send_buf with a pattern; rank 1's recv_buf starts zeroed
     # so the transfer is visible. Each rank registers both windows because
@@ -266,6 +288,7 @@ def main():
     comm_mpi.Barrier()
 
     # Host-side validation on the receiver — compare the full 1 MiB payload.
+    mismatches = 0
     if rank == DST_RANK:
         expected = cp.arange(NUM_ELEMS, dtype='int64')
         mismatches = int((recv_buf != expected).sum().item())
@@ -274,12 +297,16 @@ def main():
         else:
             print(f"[rank {rank}] [ERROR] {mismatches} / {NUM_ELEMS} mismatches")
 
+    # Only the destination rank validates, so share the verdict for the exit
+    # code.
+    mismatches = comm_mpi.bcast(mismatches, root=DST_RANK)
+
     dev_comm_resource.close()
     send_win_resource.close()
     recv_win_resource.close()
     nccl_comm.destroy()
 
-    return 0
+    return 0 if mismatches == 0 else 1
 
 
 if __name__ == "__main__":

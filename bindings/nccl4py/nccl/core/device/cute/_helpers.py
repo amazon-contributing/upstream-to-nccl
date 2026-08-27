@@ -1,7 +1,7 @@
 """Hand-written internal utilities for the CuTeDSL bindings.
 
-Holds the ``_alloca_struct`` stack-storage helper and the ``_to_ptr`` /
-``_to_coop_value`` / ``_to_value`` coercion helpers used by the callers.
+Holds the ``_alloca_*`` stack-storage helpers, ``_load_cft_le_info``, and the
+``_to_ptr`` / ``_to_coop_value`` / ``_to_value`` coercion helpers.
 Device bitcode discovery lives in :mod:`_bindings`, next to the
 ``@cute.extern`` stubs that link against it.
 """
@@ -12,6 +12,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import dsl_user_op
 
 from ._structs import ncclCoopAny
+from .types import CftLeInfo
 
 
 @dsl_user_op
@@ -32,6 +33,41 @@ def _alloca_struct(struct_cls, *, alignment=None, loc=None, ip=None) -> ir.Value
         alignment=alignment,
         loc=loc,
         ip=ip,
+    )
+
+
+@dsl_user_op
+def _alloca_cft_le_info(*, loc=None, ip=None) -> tuple[ir.Value, ir.Value]:
+    """Alloca the ``(ncclCftLeId, size_t)`` out-params of ``ncclGet*LeInfo``.
+
+    Returns:
+        ``(le_id_ptr, le_offset_ptr)``, both ``!llvm.ptr`` ir.Values.
+    """
+    ptr_type = ir.Type.parse("!llvm.ptr")
+    one = cutlass.Int32(1).ir_value()
+    return (
+        llvm.alloca(res=ptr_type, array_size=one,
+                    elem_type=ir.IntegerType.get_signless(32), loc=loc, ip=ip),
+        llvm.alloca(res=ptr_type, array_size=one,
+                    elem_type=ir.IntegerType.get_signless(64), loc=loc, ip=ip),
+    )
+
+
+@dsl_user_op
+def _load_cft_le_info(le_id_ptr, le_offset_ptr, *, loc=None, ip=None) -> CftLeInfo:
+    """Load the out-params filled by ``ncclGet*LeInfo``.
+
+    Returns:
+        Logical endpoint information containing ``cutlass.Uint32`` and
+        ``cutlass.Uint64`` values.
+    """
+    return CftLeInfo(
+        le_id=cutlass.Uint32(
+            llvm.load(ir.IntegerType.get_signless(32), le_id_ptr, loc=loc, ip=ip)
+        ),
+        le_offset=cutlass.Uint64(
+            llvm.load(ir.IntegerType.get_signless(64), le_offset_ptr, loc=loc, ip=ip)
+        ),
     )
 
 

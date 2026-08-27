@@ -102,6 +102,16 @@ def nccl_team_lsa(dev_comm: _LLVMPtrType) -> ncclTeam: ...
 @cute.extern(name="ncclTeamRail", source=_BC)
 def nccl_team_rail(dev_comm: _LLVMPtrType) -> ncclTeam: ...
 
+# `mode` is ncclCftTeamMode_t, i.e. nccl.bindings.nccl.CftTeamMode. The C
+# declaration defaults it to FLAT; the symbol takes it explicitly.
+@cute.extern(name="ncclTeamCft", source=_BC)
+def nccl_team_cft(
+    dev_comm: _LLVMPtrType, mode: cutlass.Int32,
+) -> ncclTeam: ...
+
+@cute.extern(name="ncclTeamCftMultimem", source=_BC)
+def nccl_team_cft_multimem(dev_comm: _LLVMPtrType) -> ncclTeam: ...
+
 @cute.extern(name="ncclTeamRankToWorld", source=_BC)
 def nccl_team_rank_to_world(
     dev_comm: _LLVMPtrType, team: ncclTeam, rank: cutlass.Int32,
@@ -173,6 +183,49 @@ def nccl_get_resource_buffer_multimem_pointer(
 def nccl_get_resource_buffer_lsa_multimem_pointer(
     dev_comm: _LLVMPtrType, handle: cutlass.Uint32,
 ) -> _LLVMPtrType: ...
+
+
+# === CFT logical endpoints ===
+#
+# `le_id` and `le_offset` are out-params: pointers to caller-owned
+# ncclCftLeId (uint32) and size_t storage.
+
+@cute.extern(name="ncclGetCftLeInfo", source=_BC)
+def nccl_get_cft_le_info(
+    window: _LLVMPtrType, offset: cutlass.Int64, peer_cft: cutlass.Int32,
+    cft_team: ncclTeam, dev_comm: _LLVMPtrType, le_id: _LLVMPtrType,
+    le_offset: _LLVMPtrType,
+) -> None: ...
+
+@cute.extern(name="ncclGetPeerLeInfo", source=_BC)
+def nccl_get_peer_le_info(
+    window: _LLVMPtrType, offset: cutlass.Int64, peer_world: cutlass.Int32,
+    dev_comm: _LLVMPtrType, le_id: _LLVMPtrType, le_offset: _LLVMPtrType,
+) -> None: ...
+
+@cute.extern(name="ncclGetMultimemLeInfo", source=_BC)
+def nccl_get_multimem_le_info(
+    window: _LLVMPtrType, offset: cutlass.Int64, dev_comm: _LLVMPtrType,
+    le_id: _LLVMPtrType, le_offset: _LLVMPtrType,
+) -> None: ...
+
+@cute.extern(name="ncclGetResourceBufferCftLeInfo", source=_BC)
+def nccl_get_resource_buffer_cft_le_info(
+    dev_comm: _LLVMPtrType, handle: cutlass.Uint32, peer_cft: cutlass.Int32,
+    le_id: _LLVMPtrType, le_offset: _LLVMPtrType,
+) -> None: ...
+
+@cute.extern(name="ncclGetResourceBufferPeerLeInfo", source=_BC)
+def nccl_get_resource_buffer_peer_le_info(
+    dev_comm: _LLVMPtrType, handle: cutlass.Uint32, peer_world: cutlass.Int32,
+    le_id: _LLVMPtrType, le_offset: _LLVMPtrType,
+) -> None: ...
+
+@cute.extern(name="ncclGetResourceBufferMultimemLeInfo", source=_BC)
+def nccl_get_resource_buffer_multimem_le_info(
+    dev_comm: _LLVMPtrType, handle: cutlass.Uint32, le_id: _LLVMPtrType,
+    le_offset: _LLVMPtrType,
+) -> None: ...
 
 
 _CUTE_DTYPE_SUFFIX_MAPPING = {

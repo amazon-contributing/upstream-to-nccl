@@ -2,7 +2,25 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# This code was automatically generated with version 2.30.7. Do not modify it directly.
+# This code was automatically generated with version 2.31.2. Do not modify it directly.
+
+
+# <<<< PREAMBLE CONTENT >>>>
+
+cimport cython as _cyb_cython
+from libc.stdint cimport (
+    int16_t,
+    int32_t,
+    int64_t,
+    int8_t,
+    uint16_t,
+    uint32_t,
+    uint64_t,
+    uint8_t,
+)
+
+
+# <<<< END OF PREAMBLE CONTENT >>>>
 
 from ._internal cimport nccl as _nccl
 
@@ -175,6 +193,38 @@ cdef ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff, size_t count
     return _nccl._ncclScatter(sendbuff, recvbuff, count, datatype, root, comm, stream)
 
 
+cdef ncclResult_t ncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclAllReduceConfig(sendbuff, recvbuff, count, datatype, op, comm, stream, config)
+
+
+cdef ncclResult_t ncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclBroadcastConfig(sendbuff, recvbuff, count, datatype, root, comm, stream, config)
+
+
+cdef ncclResult_t ncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclReduceConfig(sendbuff, recvbuff, count, datatype, op, root, comm, stream, config)
+
+
+cdef ncclResult_t ncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclAllGatherConfig(sendbuff, recvbuff, sendcount, datatype, comm, stream, config)
+
+
+cdef ncclResult_t ncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclReduceScatterConfig(sendbuff, recvbuff, recvcount, datatype, op, comm, stream, config)
+
+
+cdef ncclResult_t ncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclAlltoAllConfig(sendbuff, recvbuff, count, datatype, comm, stream, config)
+
+
+cdef ncclResult_t ncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclGatherConfig(sendbuff, recvbuff, count, datatype, root, comm, stream, config)
+
+
+cdef ncclResult_t ncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclScatterConfig(sendbuff, recvbuff, count, datatype, root, comm, stream, config)
+
+
 cdef ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
     return _nccl._ncclSend(sendbuff, count, datatype, peer, comm, stream)
 
@@ -259,6 +309,7 @@ cdef ncclResult_t ncclParamGetAllParameterKeys(const char*** table, int* tableLe
     return _nccl._ncclParamGetAllParameterKeys(table, tableLen)
 
 
+@_cyb_cython.show_performance_hints(False)
 cdef void ncclParamDumpAll() except* nogil:
     _nccl._ncclParamDumpAll()
 
@@ -291,12 +342,32 @@ cdef ncclResult_t ncclGetPeerDevicePointer(ncclWindow_t window, size_t offset, i
     return _nccl._ncclGetPeerDevicePointer(window, offset, peer, outPtr)
 
 
+cdef ncclResult_t ncclGetMultimemDeviceLeInfo(ncclWindow_t window, size_t offset, ncclCftLeId* leId, size_t* leOffset) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclGetMultimemDeviceLeInfo(window, offset, leId, leOffset)
+
+
+cdef ncclResult_t ncclGetCftDeviceLeInfo(ncclWindow_t window, size_t offset, int peerCft, ncclTeam_t cftTeam, ncclCftLeId* leId, size_t* leOffset) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclGetCftDeviceLeInfo(window, offset, peerCft, cftTeam, leId, leOffset)
+
+
+cdef ncclResult_t ncclGetPeerDeviceLeInfo(ncclWindow_t window, size_t offset, int peerWorld, ncclCftLeId* leId, size_t* leOffset) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclGetPeerDeviceLeInfo(window, offset, peerWorld, leId, leOffset)
+
+
 cdef ncclTeam_t ncclTeamWorld(ncclComm_t comm) except* nogil:
     return _nccl._ncclTeamWorld(comm)
 
 
 cdef ncclTeam_t ncclTeamLsa(ncclComm_t comm) except* nogil:
     return _nccl._ncclTeamLsa(comm)
+
+
+cdef ncclTeam_t ncclTeamCft(ncclComm_t comm, ncclCftTeamMode_t mode) except* nogil:
+    return _nccl._ncclTeamCft(comm, mode)
+
+
+cdef ncclTeam_t ncclTeamCftMultimem(ncclComm_t comm) except* nogil:
+    return _nccl._ncclTeamCftMultimem(comm)
 
 
 cdef ncclTeam_t ncclTeamRail(ncclComm_t comm) except* nogil:
