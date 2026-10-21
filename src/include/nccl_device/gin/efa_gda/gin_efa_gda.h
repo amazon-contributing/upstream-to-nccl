@@ -162,7 +162,10 @@ struct PutValuePayloadEncoder {
 /* ── Thread-exclusive Put (NCCL_GIN_RESOURCE_SHARING_THREAD) ─────────
  * One thread posts per QP, so the SQ cursors use plain loads and stores. Only
  * Put is specialized; Get and PutValue take the GPU path. Do not mix THREAD and
- * CTA/GPU posting on one QP without a flush in between. */
+ * CTA/GPU posting on one QP without a flush in between.
+ * Advertised so device code can request THREAD sharing only where this path
+ * exists; headers without it run a THREAD handle as GPU-shared. */
+#define NCCL_GIN_EFA_GDA_HAS_THREAD_PUT 1
 
 NCCL_DEVICE_INLINE static void postPutThread(nccl_ofi_gin_gdaki_dev_endpoint_handle* ep, uint16_t ah, uint16_t qpn,
                                              uint32_t qkey, uint64_t dstAddr, uint32_t dstRkey,
