@@ -51,6 +51,8 @@ enum ncclTopoGdrMode {
 };
 ncclResult_t ncclTopoCheckGdr(struct ncclTopoSystem* topo, int rank, int64_t netId, int read,
                               enum ncclTopoGdrMode* gdrMode);
+ncclResult_t ncclTopoGetDmaBufMapping(struct ncclTopoSystem* system, int rank, int deviceType, int64_t deviceId,
+                                      enum ncclTopoGdrMode* mapping);
 
 enum ncclTopoFlushType {
   ncclTopoFlushNone = 0,   // no flush needed
@@ -96,8 +98,10 @@ ncclResult_t ncclTopoGetGpuCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetNetCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetNvsCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetLocalNet(struct ncclTopoSystem* system, int rank, int channelId, int64_t* id, int* dev);
-ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* comm, int* localGinDevs, int* localGinCount);
-ncclResult_t ncclTopoGetLocalRmaDevs(struct ncclComm* comm, int* localRmaDevs, int* localRmaCount);
+ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* comm, int64_t* localGinIds, int* localGinDevs,
+                                     int* localGinCount);
+ncclResult_t ncclTopoGetLocalRmaDevs(struct ncclComm* comm, int64_t* localRmaIds, int* localRmaDevs,
+                                     int* localRmaCount);
 ncclResult_t ncclTopoGetLocalGpu(struct ncclTopoSystem* system, int64_t netId, int* gpuIndex);
 ncclResult_t ncclTopoGetLocalNetCountByBw(struct ncclTopoSystem* system, int gpu, int* count, float* bw);
 

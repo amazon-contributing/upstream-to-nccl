@@ -20,6 +20,8 @@ extern ncclGin_t ncclGinProxy;
 extern int ncclGinProxyVersion;
 
 ncclResult_t ncclGinProxyInit(struct ncclComm* comm);
+ncclResult_t ncclGinProxyConfigureDmaBufMapping(struct ncclComm* comm, const int64_t* localGinIds, int nLocalGinDevs,
+                                                struct ncclGinBackendState* backend);
 ncclResult_t ncclGinProxyFlushesAllPutsOnAnySignal(void* collComm, bool* flushesAll);
 
 #endif

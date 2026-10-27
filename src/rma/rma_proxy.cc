@@ -13,6 +13,7 @@
 #include "checks.h"
 #include "gdrwrap.h"
 #include "comm.h"
+#include "graph/topo.h"
 #include "bootstrap.h"
 #include "compiler.h"
 #include "rma/rma.h"
@@ -76,8 +77,10 @@ void ncclDumpRmaProxyState(int signal);
 
 // ---- Internal helpers ----
 
-static ncclResult_t getDmaBufFd(void* addr, size_t length, int* fd, bool forceNonDataDirect = false) {
+static ncclResult_t getDmaBufFd(void* addr, size_t length, int* fd, enum ncclTopoGdrMode mapping,
+                                bool forceNonDataDirect = false) {
   if (ncclParamDmaBufEnable() == 0) return ncclInvalidUsage;
+  if (mapping != ncclTopoGdrModeDefault && mapping != ncclTopoGdrModePci) return ncclInvalidArgument;
 
 #if CUDA_VERSION >= 11070
   static size_t hostPageSize = ncclOsGetPageSize();
@@ -85,7 +88,7 @@ static ncclResult_t getDmaBufFd(void* addr, size_t length, int* fd, bool forceNo
   ALIGN_SIZE(alignedSize, hostPageSize);
 
 #if CUDA_VERSION >= 12080
-  if (ncclParamIbDataDirect() && !forceNonDataDirect) {
+  if (ncclParamIbDataDirect() && !forceNonDataDirect && mapping == ncclTopoGdrModePci) {
     CUresult status =
       pfn_cuMemGetHandleForAddressRange((void*)fd, (CUdeviceptr)addr, alignedSize, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD,
                                         CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE);
@@ -102,8 +105,9 @@ static ncclResult_t getDmaBufFd(void* addr, size_t length, int* fd, bool forceNo
 
 // Check if the RMA plugin supports DMA-BUF, if so we can try to get the DMA-BUF handle from CUDA,
 // if that fails we fallback to non-DMA-BUF
-static ncclResult_t ncclRmaProxyRegMrSym(ncclRma_t* rmaComm, void* rmaCollComm, ncclNetProperties_t props, void* addr,
-                                         size_t size, int type, int mr_flags, void** mhandle) {
+static ncclResult_t ncclRmaProxyRegMrSym(ncclRma_t* rmaComm, void* rmaCollComm, ncclNetProperties_t props,
+                                         enum ncclTopoGdrMode mapping, void* addr, size_t size, int type, int mr_flags,
+                                         void** mhandle) {
   if (type == NCCL_PTR_HOST) {
     NCCLCHECK(rmaComm->regMrSym(rmaCollComm, addr, size, type, mr_flags, mhandle));
   } else if (type == NCCL_PTR_CUDA) {
@@ -111,14 +115,14 @@ static ncclResult_t ncclRmaProxyRegMrSym(ncclRma_t* rmaComm, void* rmaCollComm, 
     if (ncclParamDmaBufEnable() && (props.ptrSupport & NCCL_PTR_DMABUF)) {
       ncclResult_t registrationResult = ncclSuccess;
       int dmabufFd = -1;
-      dmabufResult = getDmaBufFd(addr, size, &dmabufFd);
+      dmabufResult = getDmaBufFd(addr, size, &dmabufFd, mapping);
       if (dmabufResult == ncclSuccess) {
         registrationResult = rmaComm->regMrSymDmaBuf(rmaCollComm, addr, size, type, 0, dmabufFd, mr_flags, mhandle);
         close(dmabufFd);
       }
       if (registrationResult != ncclSuccess) {
         dmabufFd = -1;
-        dmabufResult = getDmaBufFd(addr, size, &dmabufFd, true);
+        dmabufResult = getDmaBufFd(addr, size, &dmabufFd, mapping, true);
         if (dmabufResult == ncclSuccess) {
           NCCLCHECK(rmaComm->regMrSymDmaBuf(rmaCollComm, addr, size, type, 0, dmabufFd, mr_flags, mhandle));
           close(dmabufFd);
@@ -151,9 +155,10 @@ static ncclResult_t ncclRmaProxyCtxAlloc(struct ncclComm* comm, ncclRma_t* rmaCo
   NCCLCHECK(ncclCuMemAlloc((void**)&rmaProxyCtx->signalsDev, &rmaProxyCtx->signalsCumemhandle, CU_MEM_HANDLE_TYPE_NONE,
                            signalsBufSize, comm->memManager));
   CUDACHECK(cudaMemset(rmaProxyCtx->signalsDev, 0, signalsBufSize));
-  NCCLCHECK(ncclRmaProxyRegMrSym(
-    rmaComm, rmaProxyCtx->rmaCollComm, rmaProxyCtx->props, rmaProxyCtx->signalsDev, signalsBufSize, NCCL_PTR_CUDA,
-    NCCL_NET_MR_FLAG_FORCE_SO | NCCL_NET_MR_FLAG_SIGNAL_NEVER_RESET, &rmaProxyCtx->signalsMhandle));
+  NCCLCHECK(ncclRmaProxyRegMrSym(rmaComm, rmaProxyCtx->rmaCollComm, rmaProxyCtx->props,
+                                 comm->rmaState.rmaProxyState.dmaBufMapping, rmaProxyCtx->signalsDev, signalsBufSize,
+                                 NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO | NCCL_NET_MR_FLAG_SIGNAL_NEVER_RESET,
+                                 &rmaProxyCtx->signalsMhandle));
   // Allocate the host buffer to track the expected values of the signals
   NCCLCHECK(ncclCalloc(&rmaProxyCtx->signalsHost, signalsBufSize));
   // Allocate the sequence numbers for the per-rank network function descriptors
@@ -215,8 +220,9 @@ static ncclResult_t ncclRmaProxyCtxAllocGraph(struct ncclComm* comm, ncclRma_t* 
                                   &rmaProxyCtx->cpuAccessSignalsGdrHandle, comm->memManager));
   int cpuAccessSignalsType = (rmaProxyCtx->cpuAccessSignalsGdrHandle != NULL) ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
   NCCLCHECK(ncclRmaProxyRegMrSym(rmaComm, rmaProxyCtx->rmaCollComm, rmaProxyCtx->props,
-                                 rmaProxyCtx->cpuAccessSignalsDev, signalsBufSize, cpuAccessSignalsType,
-                                 NCCL_NET_MR_FLAG_FORCE_SO, &rmaProxyCtx->cpuAccessSignalsMhandle));
+                                 comm->rmaState.rmaProxyState.dmaBufMapping, rmaProxyCtx->cpuAccessSignalsDev,
+                                 signalsBufSize, cpuAccessSignalsType, NCCL_NET_MR_FLAG_FORCE_SO,
+                                 &rmaProxyCtx->cpuAccessSignalsMhandle));
   // Allocate the host buffer to track the expected values of the signals
   NCCLCHECK(ncclCalloc(&rmaProxyCtx->cpuAccessSignalsHost, signalsBufSize));
 
@@ -225,9 +231,9 @@ static ncclResult_t ncclRmaProxyCtxAllocGraph(struct ncclComm* comm, ncclRma_t* 
   NCCLCHECK(ncclCuMemAlloc((void**)&rmaProxyCtx->flushBufDev, &rmaProxyCtx->flushBufCumemhandle,
                            CU_MEM_HANDLE_TYPE_NONE, flushBufSize, comm->memManager));
   CUDACHECK(cudaMemset(rmaProxyCtx->flushBufDev, 0, flushBufSize));
-  NCCLCHECK(ncclRmaProxyRegMrSym(rmaComm, rmaProxyCtx->rmaCollComm, rmaProxyCtx->props, rmaProxyCtx->flushBufDev,
-                                 flushBufSize, NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO,
-                                 &rmaProxyCtx->flushBufMhandle));
+  NCCLCHECK(ncclRmaProxyRegMrSym(rmaComm, rmaProxyCtx->rmaCollComm, rmaProxyCtx->props,
+                                 comm->rmaState.rmaProxyState.dmaBufMapping, rmaProxyCtx->flushBufDev, flushBufSize,
+                                 NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO, &rmaProxyCtx->flushBufMhandle));
   // Allocate and initialize persistent descriptor queue
   rmaProxyCtx->persistentQueues =
     ncclMemoryStackAlloc<struct ncclIntruQueue<struct ncclRmaProxyDesc, &ncclRmaProxyDesc::next>>(&comm->memPermanent,
@@ -372,8 +378,8 @@ ncclResult_t ncclRmaProxyRegister(struct ncclComm* comm, void* address, size_t s
                                   void* rmaHostWins[NCCL_RMA_MAX_CONNECTIONS]) {
   struct ncclRmaProxyState* rmaProxyState = &comm->rmaState.rmaProxyState;
   for (int n = 0; n < rmaProxyState->rmaCommCount; n++) {
-    NCCLCHECK(ncclRmaProxyRegMrSym(rmaProxyState->ncclRma, rmaProxyState->rmaComms[n], rmaProxyState->props[n], address,
-                                   size, NCCL_PTR_CUDA, 0, &rmaHostWins[n]));
+    NCCLCHECK(ncclRmaProxyRegMrSym(rmaProxyState->ncclRma, rmaProxyState->rmaComms[n], rmaProxyState->props[n],
+                                   rmaProxyState->dmaBufMapping, address, size, NCCL_PTR_CUDA, 0, &rmaHostWins[n]));
     if (rmaHostWins[n] == NULL) {
       WARN("rank %d - RMA Symmetric register failed: buff %p, size %ld", comm->rank, address, size);
       return ncclSystemError;
@@ -457,8 +463,9 @@ ncclResult_t ncclRmaProxyConnectOnce(struct ncclComm* comm) {
   }
 
   int rmaCommCount;
+  int64_t localRmaIds[NCCL_TOPO_MAX_NODES];
   int localRmaDevs[NCCL_TOPO_MAX_NODES];
-  NCCLCHECK(ncclTopoGetLocalRmaDevs(comm, localRmaDevs, &rmaProxyState->rmaCommCount));
+  NCCLCHECK(ncclTopoGetLocalRmaDevs(comm, localRmaIds, localRmaDevs, &rmaProxyState->rmaCommCount));
   rmaCommCount = std::min<int>(rmaProxyState->rmaCommCount, NCCL_RMA_MAX_CONNECTIONS);
   rmaCommCount = std::min<int>(rmaCommCount, ndev);
 
@@ -482,6 +489,20 @@ ncclResult_t ncclRmaProxyConnectOnce(struct ncclComm* comm) {
     goto fail;
   }
   rmaProxyState->rmaCommCount = rmaCommCount;
+
+  NCCLCHECKGOTO(ncclTopoGetDmaBufMapping(comm->topo, comm->rank, RMA, localRmaIds[0], &rmaProxyState->dmaBufMapping),
+                ret, fail);
+  for (int n = 1; n < rmaCommCount; n++) {
+    enum ncclTopoGdrMode candidate;
+    NCCLCHECKGOTO(ncclTopoGetDmaBufMapping(comm->topo, comm->rank, RMA, localRmaIds[n], &candidate), ret, fail);
+    if (candidate != rmaProxyState->dmaBufMapping) {
+      WARN("RMA proxy selected devices require mixed DMA-BUF mappings; this is not supported.");
+      ret = ncclInvalidUsage;
+      goto fail;
+    }
+  }
+  INFO(NCCL_INIT | NCCL_NET, "RMA proxy DMA-BUF mapping: mode=%s source=topology",
+       rmaProxyState->dmaBufMapping == ncclTopoGdrModePci ? "PCIe" : "Default");
 
   NCCLCHECKGOTO(ncclCalloc(&allHandles, (size_t)comm->nRanks * NCCL_NET_HANDLE_MAXSIZE), ret, fail);
   // Loop over peers (rail-mates) only: we only connect to the specified rail's subset of handles, not every NIC (allHandles)

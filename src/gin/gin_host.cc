@@ -9,6 +9,7 @@
 #include "gin.h"
 #include "param.h"
 #include "graph.h"
+#include "graph/topo.h"
 #include "transport.h"
 #include "register_inline.h"
 #include "gin/gin_host.h"
@@ -115,8 +116,9 @@ ncclResult_t ncclGinConnectOnce(struct ncclComm* comm) {
   }
 
   int nLocalGinDevs;
+  int64_t localGinIds[NCCL_TOPO_MAX_NODES];
   int localGinDevs[NCCL_TOPO_MAX_NODES];
-  NCCLCHECK(ncclTopoGetLocalGinDevs(comm, localGinDevs, &nLocalGinDevs));
+  NCCLCHECK(ncclTopoGetLocalGinDevs(comm, localGinIds, localGinDevs, &nLocalGinDevs));
   if (nLocalGinDevs > NCCL_GIN_MAX_CONNECTIONS) {
     ATTN("Found %d local devices, but GIN supports at most %d connections. Using the first %d connections.",
          nLocalGinDevs, NCCL_GIN_MAX_CONNECTIONS, NCCL_GIN_MAX_CONNECTIONS);
@@ -209,6 +211,12 @@ ncclResult_t ncclGinConnectOnce(struct ncclComm* comm) {
 
       NCCLCHECKGOTO(backend->ncclGin->closeListen(listenComms[backendIdx]), ret, fail);
       listenComms[backendIdx] = NULL;
+    }
+
+    // Only the built-in proxy delegates symmetric DMA-BUF registration to NCCL.
+    // External GIN backends own their registration and mapping policy.
+    if (backend->ginType == NCCL_GIN_TYPE_PROXY) {
+      NCCLCHECKGOTO(ncclGinProxyConfigureDmaBufMapping(comm, localGinIds, nLocalGinDevs, backend), ret, fail);
     }
   }
 

@@ -12,6 +12,7 @@
 #include "nccl_net.h"
 #include "nccl_common.h"
 #include "nccl_rma.h"
+#include "graph.h"
 #include "alloc.h"
 #include <thread>
 #include <mutex>
@@ -185,8 +186,9 @@ struct ncclRmaProxyState {
   void* rmaInstance;
   bool connected;
   int rmaType;
+  enum ncclTopoGdrMode dmaBufMapping; // Shared by all active RMA communicators.
 
-  // Physical GIN communicator contexts
+  // Physical RMA communicator contexts
   int rmaCommCount;
   void* rmaComms[NCCL_GIN_MAX_CONNECTIONS];
   ncclNetProperties_t props[NCCL_GIN_MAX_CONNECTIONS];

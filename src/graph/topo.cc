@@ -2391,9 +2391,10 @@ ncclResult_t ncclTopoGetLocalGinDev(struct ncclTopoSystem* system, int rank, int
   return ncclTopoGetLocalNetType(system, GIN, rank, channelId, id, dev);
 }
 
-ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* comm, int* localGinDevs, int* localGinCount) {
+ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* comm, int64_t* localGinIds, int* localGinDevs,
+                                     int* localGinCount) {
   for (int c = 0; c < NCCL_TOPO_MAX_NODES; c++) {
-    NCCLCHECK(ncclTopoGetLocalGinDev(comm->topo, comm->rank, c, NULL, localGinDevs + c));
+    NCCLCHECK(ncclTopoGetLocalGinDev(comm->topo, comm->rank, c, localGinIds + c, localGinDevs + c));
     if (c > 0 && localGinDevs[c] == localGinDevs[0]) {
       *localGinCount = c;
       break;
@@ -2406,9 +2407,10 @@ ncclResult_t ncclTopoGetLocalRmaDev(struct ncclTopoSystem* system, int rank, int
   return ncclTopoGetLocalNetType(system, RMA, rank, channelId, id, dev);
 }
 
-ncclResult_t ncclTopoGetLocalRmaDevs(struct ncclComm* comm, int* localRmaDevs, int* localRmaCount) {
+ncclResult_t ncclTopoGetLocalRmaDevs(struct ncclComm* comm, int64_t* localRmaIds, int* localRmaDevs,
+                                     int* localRmaCount) {
   for (int c = 0; c < NCCL_TOPO_MAX_NODES; c++) {
-    NCCLCHECK(ncclTopoGetLocalRmaDev(comm->topo, comm->rank, c, NULL, localRmaDevs + c));
+    NCCLCHECK(ncclTopoGetLocalRmaDev(comm->topo, comm->rank, c, localRmaIds + c, localRmaDevs + c));
     if (c > 0 && localRmaDevs[c] == localRmaDevs[0]) {
       *localRmaCount = c;
       break;
