@@ -204,27 +204,104 @@ static ncclResult_t asyncProxyOpDequeue(struct ncclProxyLocalPeer* peer, ncclPro
   return ncclInternalError;
 }
 
+// Allocate a new pool of elements, chained
+static ncclResult_t proxyPoolAlloc(struct ncclProxyPool** poolPtr) {
+  struct ncclProxyPool* newPool;
+  NCCLCHECK(ncclCalloc(&newPool, 1));
+  struct ncclProxyArgs* newElems = newPool->elems;
+  for (int i = 0; i < PROXYARGS_ALLOCATE_SIZE; i++) {
+    if (i + 1 < PROXYARGS_ALLOCATE_SIZE) newElems[i].next = newElems + i + 1;
+    // Fault in the pages that every op writes, subs[0] and the fields after subs[], here rather than in the
+    // progress thread. Volatile, or the compiler may drop these stores of zero to calloc'd memory.
+    volatile char* sub0 = (volatile char*)&newElems[i].subs[0];
+    volatile char* fields = (volatile char*)&newElems[i].progress;
+    sub0[0] = 0;
+    sub0[sizeof(newElems[i].subs[0]) - 1] = 0;
+    fields[0] = 0;
+    ((volatile char*)(newElems + i + 1))[-1] = 0;
+  }
+  *poolPtr = newPool;
+  return ncclSuccess;
+}
+
+// A pool takes milliseconds to allocate and fault in, during which the progress thread would not progress any
+// operation. Pools after the first one are allocated by this thread instead, when the progress thread asks for one.
+// It inherits the CPU affinity of the progress thread, so the memory stays close to it.
+static void proxyPoolThreadMain(struct ncclProxyProgressState* state) {
+  std::unique_lock<std::mutex> lock(state->poolMutex);
+  while (true) {
+    state->poolCond.wait(lock, [&] { return state->poolThreadStop || (state->poolRequested && !state->readyPool); });
+    if (state->poolThreadStop) return;
+    lock.unlock();
+    struct ncclProxyPool* pool = NULL;
+    ncclResult_t res = proxyPoolAlloc(&pool);
+    lock.lock();
+    if (res == ncclSuccess) {
+      state->readyPool = pool;
+    } else {
+      state->poolThreadFailed = true; // The progress thread allocates the pools from now on
+    }
+    state->poolCond.notify_all();
+    if (res != ncclSuccess) return;
+  }
+}
+
+static ncclResult_t proxyPoolThreadCreate(struct ncclProxyProgressState* state, int cudaDev) {
+  STDTHREADCREATE(state->poolThread, proxyPoolThreadMain, state);
+  ncclSetThreadName(state->poolThread, "NCCL ArgsPool%2d", cudaDev);
+  return ncclSuccess;
+}
+
+// Ask the pool thread for a pool, starting it on first use. Progress thread only, the only writer of poolRequested.
+static void proxyPoolRequest(struct ncclProxyProgressState* state, int cudaDev) {
+  if (state->poolRequested) return;
+  std::lock_guard<std::mutex> lock(state->poolMutex);
+  if (state->poolThreadFailed) return;
+  if (!state->poolThread.joinable() && proxyPoolThreadCreate(state, cudaDev) != ncclSuccess) {
+    state->poolThreadFailed = true;
+    return;
+  }
+  state->poolRequested = true;
+  state->poolCond.notify_all();
+}
+
+// Add a pool to the free list: the requested one, or a new one if none was requested. If the requested pool is not
+// ready yet, wait for it, or return *added = false if wait is false. Progress thread only.
+static ncclResult_t proxyPoolAdd(struct ncclProxyProgressState* state, bool wait, bool* added) {
+  struct ncclProxyPool* pool;
+  {
+    std::unique_lock<std::mutex> lock(state->poolMutex);
+    if (state->poolRequested && !state->poolThreadFailed && !state->readyPool) {
+      if (!wait) {
+        *added = false;
+        return ncclSuccess;
+      }
+      state->poolCond.wait(lock, [&] { return state->readyPool || state->poolThreadFailed; });
+    }
+    pool = state->readyPool;
+    state->readyPool = NULL;
+    state->poolRequested = false;
+  }
+  if (pool == NULL) NCCLCHECK(proxyPoolAlloc(&pool));
+  // Add its elements to the free list, and save the pool memory block for later resource release
+  pool->elems[PROXYARGS_ALLOCATE_SIZE - 1].next = state->pool;
+  state->pool = pool->elems;
+  state->nFreeArgs += PROXYARGS_ALLOCATE_SIZE;
+  pool->next = state->pools;
+  state->pools = pool;
+  *added = true;
+  return ncclSuccess;
+}
+
 static ncclResult_t allocateArgs(struct ncclProxyProgressState* state, struct ncclProxyArgs** argsptr) {
   struct ncclProxyArgs* elem;
   if (state->pool == NULL) {
-    // Allocate a new pool of elements. Make sure we allocate the memory close
-    // to the network thread
-    struct ncclProxyPool* newPool;
-    NCCLCHECK(ncclCalloc(&newPool, 1));
-
-    struct ncclProxyArgs* newElems = newPool->elems;
-    // Chain newly allocated elements
-    for (int i = 0; i < PROXYARGS_ALLOCATE_SIZE; i++) {
-      if (i + 1 < PROXYARGS_ALLOCATE_SIZE) newElems[i].next = newElems + i + 1;
-    }
-    // Add them all to the pool list
-    state->pool = newElems;
-    // Save the pool memory block for later resource release
-    newPool->next = state->pools;
-    state->pools = newPool;
+    bool added;
+    NCCLCHECK(proxyPoolAdd(state, /*wait=*/true, &added));
   }
   elem = state->pool;
   state->pool = state->pool->next;
+  state->nFreeArgs--;
   elem->next = elem->nextPeer = NULL;
   *argsptr = elem;
   return ncclSuccess;
@@ -791,6 +868,7 @@ static ncclResult_t removeOp(struct ncclProxyProgressState* state, struct ncclPr
   }
   freeOp->next = state->pool;
   state->pool = freeOp;
+  state->nFreeArgs++;
   DEBUG_PROXY_PRINT("Removed %5ld (%5ld) : ", OP_INDEX(freeOp), OP_INDEX(*freeOp->proxyAppendPtr));
 #ifdef DEBUG_PROXY
   NCCLCHECK(dumpProxyState(state));
@@ -831,6 +909,18 @@ static ncclResult_t progressOps(struct ncclProxyState* proxyState, struct ncclPr
 }
 
 NCCL_PARAM(ProxyAppendBatchSize, "PROXY_APPEND_BATCH_SIZE", 16);
+
+// Number of posted ops, up to max, in the group starting at opIndex (same peer and opCount)
+static int proxyGroupOps(struct ncclProxyOpsPool* pool, int opIndex, int max) {
+  int peer = opIndex / MAX_OPS_PER_PEER;
+  uint64_t opCount = pool->ops[opIndex].opCount;
+  int n = 0;
+  while (opIndex != -1 && n < max && opIndex / MAX_OPS_PER_PEER == peer && pool->ops[opIndex].opCount == opCount) {
+    n++;
+    opIndex = pool->ops[opIndex].next;
+  }
+  return n;
+}
 
 static ncclResult_t ncclProxyGetPostedOps(struct ncclProxyState* proxyState, int* added) {
   struct ncclProxyProgressState* state = &proxyState->progressState;
@@ -876,8 +966,19 @@ process_nextops:
   for (int opIndex = state->nextOps; opIndex != -1;) {
     struct ncclProxyOp* peerOp = pool->ops + opIndex;
     int peer = opIndex / MAX_OPS_PER_PEER;
-    if ((lastOpCount && peerOp->opCount != lastOpCount) || ((lastPeer != -1) && peer != lastPeer)) count++;
+    bool newGroup = (lastOpCount && peerOp->opCount != lastOpCount) || ((lastPeer != -1) && peer != lastPeer);
+    if (newGroup) count++;
     if (count == ncclParamProxyAppendBatchSize() + 1) break;
+    // Not enough free args for the next group of ops (whose ops may share args): get a pool from the pool thread
+    // and, until it is ready, leave the remaining ops posted and keep progressing the ones in flight. Groups larger
+    // than the threshold, which bounds the cost of the check, wait for the pool in allocateArgs().
+    if ((newGroup || lastPeer == -1) && state->active != NULL && state->nFreeArgs < PROXYARGS_ALLOCATE_SIZE / 4 &&
+        proxyGroupOps(pool, opIndex, state->nFreeArgs + 1) > state->nFreeArgs) {
+      bool poolAdded;
+      proxyPoolRequest(state, proxyState->cudaDev);
+      NCCLCHECK(proxyPoolAdd(state, /*wait=*/false, &poolAdded));
+      if (!poolAdded) break;
+    }
     lastOpCount = peerOp->opCount;
     lastPeer = peer;
     if (peerOp->connection == NULL) return ncclInternalError;
@@ -1058,7 +1159,18 @@ ncclResult_t ncclProxyProgressDestroy(struct ncclProxyState* proxyState) {
     state->thread.join();
   }
 
+  if (state->poolThread.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(state->poolMutex);
+      state->poolThreadStop = true;
+    }
+    state->poolCond.notify_all();
+    state->poolThread.join();
+  }
+
   // Free off any memory allocated for the proxy arg pools
+  free(state->readyPool);
+  state->readyPool = NULL;
   while (state->pools != NULL) {
     struct ncclProxyPool* next = state->pools->next;
     free(state->pools);
