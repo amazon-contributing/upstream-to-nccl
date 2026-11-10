@@ -283,6 +283,16 @@ struct ncclProxyProgressState {
   struct ncclProxyArgs* pool;
   struct ncclProxyPool* pools;
   int nextOps;
+  int nFreeArgs = 0; // Length of the pool free list
+
+  // Pools after the first one are allocated by poolThread, see proxyPoolThreadMain()
+  std::thread poolThread;
+  std::mutex poolMutex; // Protects the members below
+  std::condition_variable poolCond;
+  bool poolRequested = false; // Written by the progress thread only
+  bool poolThreadStop = false;
+  bool poolThreadFailed = false;
+  struct ncclProxyPool* readyPool = nullptr;
 };
 
 // Expected proxy response fifo
