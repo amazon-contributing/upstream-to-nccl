@@ -1727,6 +1727,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         void* request = subGroup->requests[step % NCCL_STEPS];
         if (request) NCCLCHECK(proxyState->ncclNet->test(request, &done, NULL));
         if (done) {
+          bool fenced = false, wcPending = false;
           for (int i = 0; i < subGroup->groupSize; i++) {
             struct ncclProxySubArgs* sub = subGroup + i;
             int transmittedStepId = sub->transmitted;
@@ -1734,13 +1735,18 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             sub->transmitted += args->sliceSteps;
             ncclProfilerRecordProxyStepEventState(s + i, args, transmittedStepId, ncclProfilerProxyStepRecvGPUWait);
             if (step < sub->nsteps) {
-              std::atomic_thread_fence(std::memory_order_seq_cst);
+              // Issue one fence for the whole group.
+              if (!fenced) {
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                fenced = true;
+              }
               struct recvNetResources* resources = (struct recvNetResources*)(sub->connection->transportResources);
               volatile uint64_t* recvTail = resources->gdcSync ? resources->gdcSync : &resources->recvMem->tail;
               *recvTail = sub->base + sub->transmitted;
-              if (resources->gdcSync) wc_store_fence(); // Flush out WC write
+              if (resources->gdcSync) wcPending = true;
             }
           }
+          if (wcPending) wc_store_fence(); // Flush out WC writes
           args->idle = 0;
         }
       }
